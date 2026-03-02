@@ -12,14 +12,22 @@ class CurriculumParams:
     slope_deg: float
     rock_mass: float
     infinite: bool
+    alive_bonus: float = 0.0
+    upright_coef: float = 0.0
 
 
-# Default schedule matching the training plan
+# Default schedule matching the training plan.
+# alive_bonus / upright_coef provide posture scaffolding that decays to zero,
+# so the agent bootstraps standing quickly but still discovers its own gait.
 SCHEDULE = [
-    {"phase": "I",   "slope": 0.0,  "mass": 5.0,  "end_step": 5_000_000,  "infinite": False},
-    {"phase": "II",  "slope": 5.0,  "mass": 8.0,  "end_step": 15_000_000, "infinite": False},
-    {"phase": "III", "slope": 10.0, "mass": 12.0, "end_step": 30_000_000, "infinite": False},
-    {"phase": "IV",  "slope": 15.0, "mass": 10.0, "end_step": 50_000_000, "infinite": True},
+    {"phase": "I",   "slope": 0.0,  "mass": 5.0,  "end_step": 5_000_000,
+     "infinite": False, "alive_bonus": 2.0, "upright_coef": 1.0},
+    {"phase": "II",  "slope": 5.0,  "mass": 8.0,  "end_step": 15_000_000,
+     "infinite": False, "alive_bonus": 1.0, "upright_coef": 0.3},
+    {"phase": "III", "slope": 10.0, "mass": 12.0, "end_step": 30_000_000,
+     "infinite": False, "alive_bonus": 0.0, "upright_coef": 0.0},
+    {"phase": "IV",  "slope": 15.0, "mass": 10.0, "end_step": 50_000_000,
+     "infinite": True,  "alive_bonus": 0.0, "upright_coef": 0.0},
 ]
 
 
@@ -28,24 +36,23 @@ class CurriculumManager:
         self.schedule = schedule or SCHEDULE
         self._current_phase_idx = 0
 
+    def _params_from_entry(self, entry: dict) -> CurriculumParams:
+        return CurriculumParams(
+            phase=entry["phase"],
+            slope_deg=entry["slope"],
+            rock_mass=entry["mass"],
+            infinite=entry["infinite"],
+            alive_bonus=entry.get("alive_bonus", 0.0),
+            upright_coef=entry.get("upright_coef", 0.0),
+        )
+
     def get_params(self, total_steps: int) -> CurriculumParams:
         """Return curriculum parameters for the given total step count."""
         for entry in self.schedule:
             if total_steps < entry["end_step"]:
-                return CurriculumParams(
-                    phase=entry["phase"],
-                    slope_deg=entry["slope"],
-                    rock_mass=entry["mass"],
-                    infinite=entry["infinite"],
-                )
+                return self._params_from_entry(entry)
         # Past all phases — stay on last
-        last = self.schedule[-1]
-        return CurriculumParams(
-            phase=last["phase"],
-            slope_deg=last["slope"],
-            rock_mass=last["mass"],
-            infinite=last["infinite"],
-        )
+        return self._params_from_entry(self.schedule[-1])
 
     def check_transition(self, total_steps: int) -> tuple[bool, CurriculumParams]:
         """Check if a phase transition occurred. Returns (changed, new_params)."""

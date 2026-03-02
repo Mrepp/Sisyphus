@@ -24,12 +24,16 @@ class SisyphusEnv(gym.Env):
         max_steps: int = 1000,
         infinite_mode: bool = False,
         render_mode: str | None = None,
+        alive_bonus: float = 2.0,
+        upright_coef: float = 1.0,
     ):
         super().__init__()
         self.render_mode = render_mode
         self.max_steps = max_steps
         self.infinite_mode = infinite_mode
         self._slope_deg = slope_deg
+        self._alive_bonus = alive_bonus
+        self._upright_coef = upright_coef
 
         # Load model
         model_path = os.path.normpath(_MODEL_PATH)
@@ -94,9 +98,18 @@ class SisyphusEnv(gym.Env):
     # ------------------------------------------------------------------
     # Curriculum interface
     # ------------------------------------------------------------------
-    def set_curriculum_params(self, slope_deg: float, rock_mass: float, infinite_mode: bool = False):
+    def set_curriculum_params(
+        self,
+        slope_deg: float,
+        rock_mass: float,
+        infinite_mode: bool = False,
+        alive_bonus: float = 0.0,
+        upright_coef: float = 0.0,
+    ):
         self._slope_deg = slope_deg
         self.infinite_mode = infinite_mode
+        self._alive_bonus = alive_bonus
+        self._upright_coef = upright_coef
         self._set_rock_mass(rock_mass)
         self._set_slope(slope_deg)
 
@@ -212,7 +225,14 @@ class SisyphusEnv(gym.Env):
         fell = torso_z < 0.7
         fall_penalty = 500.0 if fell else 0.0
 
-        reward = height_reward - torque_penalty - fall_penalty
+        # Posture scaffolding (decayed via curriculum — zero by Phase III)
+        alive_bonus = self._alive_bonus
+        torso_xmat = self.data.xmat[self._torso_id].reshape(3, 3)
+        torso_up_dot = torso_xmat[2, 2]  # z-component of torso z-axis vs world up
+        upright_bonus = self._upright_coef * torso_up_dot
+
+        reward = (height_reward - torque_penalty - fall_penalty
+                  + alive_bonus + upright_bonus)
 
         # Infinite illusion: teleport when approaching terrain end
         if self.infinite_mode and torso_pos[0] > 0.7 * self._terrain_length:
@@ -243,6 +263,9 @@ class SisyphusEnv(gym.Env):
             "rock_height": current_rock_height,
             "total_height_accumulated": self._total_height_accumulated,
             "torso_height": torso_z,
+            "torso_up_dot": torso_up_dot,
+            "alive_bonus": alive_bonus,
+            "upright_bonus": upright_bonus,
             "step_count": self._step_count,
         }
 
