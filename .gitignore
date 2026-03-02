@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+logs/
+replays/
+renders_preview/
+renders_cinematic/
+blender_project/
+*.mp4
+*.egg-info/
+dist/
+build/
+.env
