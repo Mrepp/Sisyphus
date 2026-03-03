@@ -211,7 +211,7 @@ def export_for_blender(
     metadata = traj.get("metadata", {})
     scene_meta = {
         "slope_deg": metadata.get("slope", 0.0),
-        "rock_mass_kg": metadata.get("mass", 8.0),
+        "rock_mass_kg": metadata.get("mass", 40.0),
         "checkpoint": metadata.get("checkpoint", -1),
         "total_training_steps": metadata.get("total_steps", -1),
         "source_fps": metadata.get("fps", 66.67),

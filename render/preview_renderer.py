@@ -21,7 +21,7 @@ class PreviewRenderer:
         # Camera defaults
         self.camera = mujoco.MjvCamera()
         self.camera.type = mujoco.mjtCamera.mjCAMERA_FREE
-        self.camera.distance = 5.0
+        self.camera.distance = 7.0
         self.camera.azimuth = 90.0
         self.camera.elevation = -15.0
         self.camera.lookat[:] = [0, 0, 1.0]

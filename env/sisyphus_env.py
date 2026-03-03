@@ -16,16 +16,18 @@ _MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "sisyphus_
 
 class SisyphusEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 67}
+    _ROCK_RADIUS = 0.7  # metres — boulder radius (top reaches ~1.4m ≈ shoulder height)
 
     def __init__(
         self,
         slope_deg: float = 0.0,
-        rock_mass: float = 8.0,
+        rock_mass: float = 40.0,
         max_steps: int = 1000,
         infinite_mode: bool = False,
         render_mode: str | None = None,
         alive_bonus: float = 2.0,
         upright_coef: float = 1.0,
+        forward_push_coef: float = 5.0,
     ):
         super().__init__()
         self.render_mode = render_mode
@@ -34,6 +36,7 @@ class SisyphusEnv(gym.Env):
         self._slope_deg = slope_deg
         self._alive_bonus = alive_bonus
         self._upright_coef = upright_coef
+        self._forward_push_coef = forward_push_coef
 
         # Load model
         model_path = os.path.normpath(_MODEL_PATH)
@@ -89,6 +92,7 @@ class SisyphusEnv(gym.Env):
         # State tracking
         self._step_count = 0
         self._prev_rock_height = 0.0
+        self._prev_rock_x = 0.0
         self._total_height_accumulated = 0.0
         self._reset_x = 1.0  # x position to teleport back to
 
@@ -105,11 +109,13 @@ class SisyphusEnv(gym.Env):
         infinite_mode: bool = False,
         alive_bonus: float = 0.0,
         upright_coef: float = 0.0,
+        forward_push_coef: float = 5.0,
     ):
         self._slope_deg = slope_deg
         self.infinite_mode = infinite_mode
         self._alive_bonus = alive_bonus
         self._upright_coef = upright_coef
+        self._forward_push_coef = forward_push_coef
         self._set_rock_mass(rock_mass)
         self._set_slope(slope_deg)
 
@@ -225,13 +231,22 @@ class SisyphusEnv(gym.Env):
         fell = torso_z < 0.7
         fall_penalty = 500.0 if fell else 0.0
 
+        # Forward-push reward: encourage +x rock movement, penalise -x
+        rock_x = rock_pos[0]
+        delta_x_rock = rock_x - self._prev_rock_x
+        self._prev_rock_x = rock_x
+        # Decay within episode so agent doesn't over-rely on shaping
+        episode_progress = self._step_count / self.max_steps  # 0→1
+        forward_decay = max(1.0 - episode_progress, 0.0)
+        forward_reward = self._forward_push_coef * delta_x_rock * forward_decay
+
         # Posture scaffolding (decayed via curriculum — zero by Phase III)
         alive_bonus = self._alive_bonus
         torso_xmat = self.data.xmat[self._torso_id].reshape(3, 3)
         torso_up_dot = torso_xmat[2, 2]  # z-component of torso z-axis vs world up
         upright_bonus = self._upright_coef * torso_up_dot
 
-        reward = (height_reward - torque_penalty - fall_penalty
+        reward = (height_reward + forward_reward - torque_penalty - fall_penalty
                   + alive_bonus + upright_bonus)
 
         # Infinite illusion: teleport when approaching terrain end
@@ -266,6 +281,7 @@ class SisyphusEnv(gym.Env):
             "torso_up_dot": torso_up_dot,
             "alive_bonus": alive_bonus,
             "upright_bonus": upright_bonus,
+            "forward_reward": forward_reward,
             "step_count": self._step_count,
         }
 
@@ -287,8 +303,8 @@ class SisyphusEnv(gym.Env):
             self.data.qpos[self._root_qpos_adr + 2] = 1.4  # z height
 
         # Randomise rock position slightly
-        rock_x = self.np_random.uniform(0.5, 0.7)
-        rock_z = self._terrain_height_at_x(rock_x) + 0.15  # radius above terrain
+        rock_x = self.np_random.uniform(1.3, 1.7)
+        rock_z = self._terrain_height_at_x(rock_x) + self._ROCK_RADIUS  # radius above terrain
         self.data.qpos[self._rock_qpos_adr] = rock_x
         self.data.qpos[self._rock_qpos_adr + 1] = 0.0
         self.data.qpos[self._rock_qpos_adr + 2] = rock_z
@@ -303,6 +319,7 @@ class SisyphusEnv(gym.Env):
         self._step_count = 0
         self._total_height_accumulated = 0.0
         self._prev_rock_height = self.data.xpos[self._rock_id][2]
+        self._prev_rock_x = self.data.xpos[self._rock_id][0]
 
         obs = self._get_obs()
         info = {
@@ -324,7 +341,7 @@ class SisyphusEnv(gym.Env):
 
         cam = mujoco.MjvCamera()
         cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-        cam.distance = 5.0
+        cam.distance = 7.0
         cam.azimuth = 90.0
         cam.elevation = -15.0
         cam.lookat[:] = self.data.xpos[self._torso_id]

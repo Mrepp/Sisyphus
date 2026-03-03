@@ -44,6 +44,7 @@ class CurriculumCallback(BaseCallback):
                 params.infinite,
                 params.alive_bonus,
                 params.upright_coef,
+                params.forward_push_coef,
             )
 
             # Log to tensorboard
@@ -53,6 +54,9 @@ class CurriculumCallback(BaseCallback):
             self.logger.record("curriculum/infinite", int(params.infinite))
             self.logger.record("curriculum/alive_bonus", params.alive_bonus)
             self.logger.record("curriculum/upright_coef", params.upright_coef)
+            self.logger.record(
+                "curriculum/forward_push_coef", params.forward_push_coef
+            )
 
             self._last_phase = params.phase
 

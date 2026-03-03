@@ -22,7 +22,7 @@ def evaluate_and_render(
     replay_dir: str = "replays",
     num_episodes: int = 1,
     slope: float = 0.0,
-    rock_mass: float = 8.0,
+    rock_mass: float = 40.0,
     max_steps: int = 1000,
 ):
     env = SisyphusEnv(slope_deg=slope, rock_mass=rock_mass, max_steps=max_steps)

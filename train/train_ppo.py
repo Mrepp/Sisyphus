@@ -34,7 +34,7 @@ def make_env(slope: float, rock_mass: float, rank: int, max_steps: int = 1000):
 def create_env(
     num_envs: int = 16,
     slope: float = 0.0,
-    rock_mass: float = 5.0,
+    rock_mass: float = 20.0,
     max_steps: int = 1000,
     norm_obs: bool = True,
     norm_reward: bool = True,
@@ -120,7 +120,7 @@ def train(
         callbacks.append(CurriculumCallback(curriculum, verbose=1))
 
     if eval_env is None:
-        eval_env = SisyphusEnv(slope_deg=0.0, rock_mass=5.0, max_steps=1000)
+        eval_env = SisyphusEnv(slope_deg=0.0, rock_mass=20.0, max_steps=1000)
 
     callbacks.append(
         TrajectoryRenderCallback(
