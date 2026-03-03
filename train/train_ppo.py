@@ -60,13 +60,14 @@ def create_model(
     Any kwarg overrides the defaults below.
     """
     defaults = dict(
-        learning_rate=3e-4,
+        learning_rate=lambda f: 3e-4 * f,
         n_steps=2048,
-        batch_size=64,
+        batch_size=512,
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
+        target_kl=0.03,
         ent_coef=0.01,
         verbose=1,
         tensorboard_log=tensorboard_log,

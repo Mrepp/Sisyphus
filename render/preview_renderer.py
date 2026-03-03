@@ -55,8 +55,7 @@ class PreviewRenderer:
         T = len(qpos_seq)
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        writer = imageio.get_writer(output_path, fps=fps, codec="libx264",
-                                    is_batch=False)
+        writer = imageio.get_writer(output_path, fps=fps, codec="libx264")
 
         torso_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "torso")
 
@@ -96,8 +95,7 @@ class PreviewRenderer:
             Path to the saved MP4.
         """
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        writer = imageio.get_writer(output_path, fps=fps, codec="libx264",
-                                    is_batch=False)
+        writer = imageio.get_writer(output_path, fps=fps, codec="libx264")
 
         obs, _ = env.reset()
         torso_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "torso")

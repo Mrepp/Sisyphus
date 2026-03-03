@@ -231,6 +231,11 @@ def main():
     # --- Render trained policy ---
     phase_tag = f"phase{params.phase}_slope{params.slope_deg}_mass{params.rock_mass}"
 
+    # Detect whether the checkpoint expects hand-distance observations
+    # by inspecting the saved observation space dimension.
+    obs_dim = model.observation_space.shape[0]
+    obs_hand_dists = obs_dim > 56  # hand_dists adds 2 dims (56 → 58)
+
     print(f"\nRendering trained policy ({args.max_steps} steps)...")
     env = SisyphusEnv(
         slope_deg=params.slope_deg,
@@ -240,6 +245,7 @@ def main():
         upright_coef=params.upright_coef,
         forward_push_coef=params.forward_push_coef,
         max_steps=args.max_steps,
+        obs_hand_dists=obs_hand_dists,
     )
     renderer = PreviewRenderer(env.model, width=args.width, height=args.height)
     policy_path = os.path.join(args.output_dir, f"trained_policy_{phase_tag}.mp4")
@@ -262,6 +268,7 @@ def main():
             upright_coef=params.upright_coef,
             forward_push_coef=params.forward_push_coef,
             max_steps=args.max_steps,
+            obs_hand_dists=obs_hand_dists,
         )
         zero_policy = ZeroPolicy(env_baseline.action_space.shape)
         renderer_baseline = PreviewRenderer(

@@ -29,6 +29,7 @@ class SisyphusEnv(gym.Env):
         upright_coef: float = 1.0,
         forward_push_coef: float = 5.0,
         hand_proximity_coef: float = 0.5,
+        obs_hand_dists: bool = True,
     ):
         super().__init__()
         self.render_mode = render_mode
@@ -39,6 +40,7 @@ class SisyphusEnv(gym.Env):
         self._upright_coef = upright_coef
         self._forward_push_coef = forward_push_coef
         self._hand_proximity_coef = hand_proximity_coef
+        self._obs_hand_dists = obs_hand_dists
 
         # Load model
         model_path = os.path.normpath(_MODEL_PATH)
@@ -212,19 +214,21 @@ class SisyphusEnv(gym.Env):
         # Center of mass velocity
         com_vel = self.data.subtree_linvel[0].copy()  # whole model COM velocity
 
-        # Hand-to-rock surface distances
-        r_hand_d, l_hand_d = self._hand_rock_distances()
-        hand_dists = np.array([r_hand_d, l_hand_d])
-
-        obs = np.concatenate([
+        parts = [
             humanoid_qpos,
             humanoid_qvel,
             rock_rel,
             rock_vel,
             torso_height,
             com_vel,
-            hand_dists,
-        ])
+        ]
+
+        # Hand-to-rock surface distances (added post-initial training)
+        if self._obs_hand_dists:
+            r_hand_d, l_hand_d = self._hand_rock_distances()
+            parts.append(np.array([r_hand_d, l_hand_d]))
+
+        obs = np.concatenate(parts)
         return obs
 
     # ------------------------------------------------------------------
