@@ -28,6 +28,7 @@ class SisyphusEnv(gym.Env):
         alive_bonus: float = 2.0,
         upright_coef: float = 1.0,
         forward_push_coef: float = 5.0,
+        hand_proximity_coef: float = 0.5,
     ):
         super().__init__()
         self.render_mode = render_mode
@@ -37,6 +38,7 @@ class SisyphusEnv(gym.Env):
         self._alive_bonus = alive_bonus
         self._upright_coef = upright_coef
         self._forward_push_coef = forward_push_coef
+        self._hand_proximity_coef = hand_proximity_coef
 
         # Load model
         model_path = os.path.normpath(_MODEL_PATH)
@@ -48,6 +50,11 @@ class SisyphusEnv(gym.Env):
         self._rock_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "rock")
         self._rock_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "rock_geom")
         self._terrain_geom_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "terrain_geom")
+        self._right_hand_geom_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_GEOM, "right_hand")
+        self._left_hand_geom_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_GEOM, "left_hand")
+        self._HAND_RADIUS = 0.04
         self._hfield_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_HFIELD, "terrain")
 
         # Terrain geometry
@@ -161,6 +168,19 @@ class SisyphusEnv(gym.Env):
         self.model.body_mass[self._rock_id] = mass
 
     # ------------------------------------------------------------------
+    # Hand-rock helpers
+    # ------------------------------------------------------------------
+    def _hand_rock_distances(self) -> tuple[float, float]:
+        """Surface-to-surface distance from each hand to the rock."""
+        rock_pos = self.data.geom_xpos[self._rock_geom_id]
+        r_pos = self.data.geom_xpos[self._right_hand_geom_id]
+        l_pos = self.data.geom_xpos[self._left_hand_geom_id]
+        r = self._HAND_RADIUS + self._ROCK_RADIUS
+        right_d = max(np.linalg.norm(r_pos - rock_pos) - r, 0.0)
+        left_d = max(np.linalg.norm(l_pos - rock_pos) - r, 0.0)
+        return right_d, left_d
+
+    # ------------------------------------------------------------------
     # Observation
     # ------------------------------------------------------------------
     def _get_obs(self) -> np.ndarray:
@@ -192,6 +212,10 @@ class SisyphusEnv(gym.Env):
         # Center of mass velocity
         com_vel = self.data.subtree_linvel[0].copy()  # whole model COM velocity
 
+        # Hand-to-rock surface distances
+        r_hand_d, l_hand_d = self._hand_rock_distances()
+        hand_dists = np.array([r_hand_d, l_hand_d])
+
         obs = np.concatenate([
             humanoid_qpos,
             humanoid_qvel,
@@ -199,6 +223,7 @@ class SisyphusEnv(gym.Env):
             rock_vel,
             torso_height,
             com_vel,
+            hand_dists,
         ])
         return obs
 
@@ -246,8 +271,18 @@ class SisyphusEnv(gym.Env):
         torso_up_dot = torso_xmat[2, 2]  # z-component of torso z-axis vs world up
         upright_bonus = self._upright_coef * torso_up_dot
 
-        reward = (height_reward + forward_reward - torque_penalty - fall_penalty
-                  + alive_bonus + upright_bonus)
+        # Hand-proximity reward: encourage hands near/on the rock
+        right_dist, left_dist = self._hand_rock_distances()
+        hand_proximity = (
+            np.exp(-3.0 * right_dist)
+            + np.exp(-3.0 * left_dist)
+        )
+        hand_reward = self._hand_proximity_coef * hand_proximity
+
+        reward = (height_reward + forward_reward
+                  - torque_penalty - fall_penalty
+                  + alive_bonus + upright_bonus
+                  + hand_reward)
 
         # Infinite illusion: teleport when approaching terrain end
         if self.infinite_mode and torso_pos[0] > 0.7 * self._terrain_length:
@@ -282,6 +317,9 @@ class SisyphusEnv(gym.Env):
             "alive_bonus": alive_bonus,
             "upright_bonus": upright_bonus,
             "forward_reward": forward_reward,
+            "hand_reward": hand_reward,
+            "right_hand_dist": right_dist,
+            "left_hand_dist": left_dist,
             "step_count": self._step_count,
         }
 
@@ -314,6 +352,15 @@ class SisyphusEnv(gym.Env):
         self.data.qpos[self._rock_qpos_adr + 5] = 0.0
         self.data.qpos[self._rock_qpos_adr + 6] = 0.0
 
+        # Zero rock velocity so it starts at rest
+        self.data.qvel[self._rock_qvel_adr: self._rock_qvel_adr + 6] = 0.0
+
+        mujoco.mj_forward(self.model, self.data)
+
+        # Settle rock onto terrain surface, then kill residual velocity
+        for _ in range(10):
+            mujoco.mj_step(self.model, self.data)
+        self.data.qvel[self._rock_qvel_adr: self._rock_qvel_adr + 6] = 0.0
         mujoco.mj_forward(self.model, self.data)
 
         self._step_count = 0

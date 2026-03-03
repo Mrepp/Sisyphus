@@ -26,9 +26,9 @@ SCHEDULE = [
     {"phase": "II",  "slope": 5.0,  "mass": 35.0,  "end_step": 15_000_000,
      "infinite": False, "alive_bonus": 1.0, "upright_coef": 0.3, "forward_push_coef": 5.0},
     {"phase": "III", "slope": 10.0, "mass": 50.0,  "end_step": 30_000_000,
-     "infinite": False, "alive_bonus": 0.0, "upright_coef": 0.0, "forward_push_coef": 5.0},
+     "infinite": False, "alive_bonus": 0.0, "upright_coef": 0.2, "forward_push_coef": 5.0},
     {"phase": "IV",  "slope": 15.0, "mass": 40.0,  "end_step": 50_000_000,
-     "infinite": True,  "alive_bonus": 0.0, "upright_coef": 0.0, "forward_push_coef": 5.0},
+     "infinite": True,  "alive_bonus": 0.0, "upright_coef": 0.2, "forward_push_coef": 5.0},
 ]
 
 

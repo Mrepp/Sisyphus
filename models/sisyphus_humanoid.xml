@@ -40,7 +40,7 @@
 
     <!-- Terrain heightfield (replaces flat floor) -->
     <geom name="terrain_geom" type="hfield" hfield="terrain" material="MatPlane"
-          pos="5 0 0" friction="1.2 0.005 0.0001" condim="3" conaffinity="1" contype="1"/>
+          pos="5 0 0" friction="1.2 0.005 0.02" condim="6" conaffinity="1" contype="1"/>
 
     <!-- Humanoid -->
     <body name="torso" pos="0 0 1.4">
@@ -138,7 +138,7 @@
     <body name="rock" pos="1.5 0 0.7">
       <freejoint name="rock_joint"/>
       <geom name="rock_geom" type="sphere" size="0.7" mass="40.0" material="rock_mat"
-            friction="1.5 0.005 0.0001" condim="4" conaffinity="1" contype="1"
+            friction="1.5 0.005 0.02" condim="6" conaffinity="1" contype="1"
             solref="-10000 -200"/>
     </body>
   </worldbody>
