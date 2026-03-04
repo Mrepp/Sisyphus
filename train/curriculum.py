@@ -21,12 +21,16 @@ class CurriculumParams:
 # alive_bonus / upright_coef provide posture scaffolding that decays to zero,
 # so the agent bootstraps standing quickly but still discovers its own gait.
 SCHEDULE = [
+    # Phase I: Strong posture scaffolding. Stays until ep_len_mean > 600.
     {"phase": "I",   "slope": 0.0,  "mass": 20.0,  "end_step": 5_000_000,
-     "infinite": False, "alive_bonus": 2.0, "upright_coef": 1.0, "forward_push_coef": 5.0},
+     "infinite": False, "alive_bonus": 3.0, "upright_coef": 3.0, "forward_push_coef": 5.0},
+    # Phase II: Add slope. Reduce scaffolding gradually.
     {"phase": "II",  "slope": 5.0,  "mass": 35.0,  "end_step": 15_000_000,
-     "infinite": False, "alive_bonus": 1.0, "upright_coef": 0.3, "forward_push_coef": 5.0},
+     "infinite": False, "alive_bonus": 1.5, "upright_coef": 1.0, "forward_push_coef": 5.0},
+    # Phase III: Steeper, heavier. Minimal scaffolding.
     {"phase": "III", "slope": 10.0, "mass": 50.0,  "end_step": 30_000_000,
-     "infinite": False, "alive_bonus": 0.0, "upright_coef": 0.2, "forward_push_coef": 5.0},
+     "infinite": False, "alive_bonus": 0.5, "upright_coef": 0.3, "forward_push_coef": 5.0},
+    # Phase IV: Full difficulty. Infinite mode.
     {"phase": "IV",  "slope": 15.0, "mass": 40.0,  "end_step": 50_000_000,
      "infinite": True,  "alive_bonus": 0.0, "upright_coef": 0.2, "forward_push_coef": 5.0},
 ]

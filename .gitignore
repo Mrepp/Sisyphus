@@ -6,6 +6,7 @@ logs/
 replays/
 renders_preview/
 renders_cinematic/
+render_output/
 blender_project/
 *.mp4
 *.egg-info/

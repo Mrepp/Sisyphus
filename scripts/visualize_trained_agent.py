@@ -1,10 +1,10 @@
-"""Visualize a trained agent at its latest curriculum stage.
+"""Visualize a trained agent across all curriculum phases it has completed.
 
 Downloads the latest PPO checkpoint from a Google Drive shared folder,
-determines which curriculum phase that checkpoint reached, and renders
-the trained policy pushing the rock at the correct slope/mass settings.
+renders the trained policy at each curriculum phase (plus zero-action
+baselines), and exports Blender-ready data for each phase.
 
-Optionally renders a zero-action baseline for comparison.
+Outputs are organized in a git-commit-tagged folder under render_output/.
 
 Usage:
     python scripts/visualize_trained_agent.py
@@ -13,26 +13,29 @@ Usage:
 """
 
 import argparse
+import datetime
 import glob
+import json
 import os
 import re
+import subprocess
 import sys
 
 # Ensure project root is on the path when running as a script.
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _PROJECT_ROOT)
 
 import numpy as np
 from stable_baselines3 import PPO
 
 from env.sisyphus_env import SisyphusEnv
+from export.blender_export import export_for_blender
 from render.preview_renderer import PreviewRenderer
 from train.curriculum import SCHEDULE, CurriculumManager
 
 
 DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1bq_jR1oP4aUvxDi1A8gMRFvlgNIQKEaZ"
-LOCAL_CHECKPOINT_DIR = os.path.join(
-    os.path.abspath(os.path.join(os.path.dirname(__file__), "..")), "checkpoints"
-)
+LOCAL_CHECKPOINT_DIR = os.path.join(_PROJECT_ROOT, "checkpoints")
 
 
 class ZeroPolicy:
@@ -43,6 +46,19 @@ class ZeroPolicy:
 
     def predict(self, obs, deterministic=True):
         return self._zeros, None
+
+
+def _get_git_info() -> tuple[str, str]:
+    """Return (short_hash, full_hash) from the project repo."""
+    try:
+        full = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_PROJECT_ROOT, text=True,
+        ).strip()
+        short = full[:7]
+        return short, full
+    except Exception:
+        return "unknown", "unknown"
 
 
 def download_latest_checkpoint(folder_url: str, local_dir: str) -> tuple[str, int]:
@@ -138,9 +154,102 @@ def find_local_checkpoint(checkpoint_dir: str) -> tuple[str, int]:
     return latest_path.replace(".zip", ""), latest_steps
 
 
+def _phases_up_to(total_steps: int) -> list[dict]:
+    """Return all curriculum phases the checkpoint has reached, in order.
+
+    Includes completed phases and the current (possibly in-progress) phase.
+    """
+    phases = []
+    for entry in SCHEDULE:
+        phases.append(entry)
+        if total_steps < entry["end_step"]:
+            break  # this is the current phase — include it and stop
+    return phases
+
+
+def _render_phase(
+    phase_entry: dict,
+    model,
+    obs_hand_dists: bool,
+    phase_dir: str,
+    args,
+    git_short: str,
+    total_steps: int,
+):
+    """Render trained policy + optional baseline for one curriculum phase."""
+    curriculum = CurriculumManager()
+    params = curriculum._params_from_entry(phase_entry)
+
+    print(f"\n--- Phase {params.phase}: slope={params.slope_deg}°, mass={params.rock_mass}kg ---")
+
+    # --- Trained policy ---
+    print(f"  Rendering trained policy ({args.max_steps} steps)...")
+    env = SisyphusEnv(
+        slope_deg=params.slope_deg,
+        rock_mass=params.rock_mass,
+        infinite_mode=params.infinite,
+        alive_bonus=params.alive_bonus,
+        upright_coef=params.upright_coef,
+        forward_push_coef=params.forward_push_coef,
+        max_steps=args.max_steps,
+        obs_hand_dists=obs_hand_dists,
+    )
+    renderer = PreviewRenderer(env.model, width=args.width, height=args.height)
+
+    mp4_path = os.path.join(phase_dir, "trained_policy.mp4")
+    traj_path = os.path.join(phase_dir, "trajectory.npz")
+
+    traj_meta = {
+        "slope": params.slope_deg,
+        "mass": params.rock_mass,
+        "phase": params.phase,
+        "total_steps": total_steps,
+        "git_commit": git_short,
+    }
+
+    renderer.render_episode(
+        env, model, mp4_path,
+        fps=args.fps, max_steps=args.max_steps, deterministic=True,
+        trajectory_path=traj_path, trajectory_metadata=traj_meta,
+    )
+    renderer.close()
+    env.close()
+    print(f"    Saved: {mp4_path}")
+
+    # --- Blender export ---
+    blender_dir = os.path.join(phase_dir, "blender")
+    print(f"  Exporting Blender data...")
+    export_for_blender(traj_path, blender_dir, target_fps=60.0)
+    print(f"    Saved: {blender_dir}/")
+
+    # --- Baseline ---
+    if not args.no_baseline:
+        print(f"  Rendering zero-action baseline...")
+        env_bl = SisyphusEnv(
+            slope_deg=params.slope_deg,
+            rock_mass=params.rock_mass,
+            infinite_mode=params.infinite,
+            alive_bonus=params.alive_bonus,
+            upright_coef=params.upright_coef,
+            forward_push_coef=params.forward_push_coef,
+            max_steps=args.max_steps,
+            obs_hand_dists=obs_hand_dists,
+        )
+        zero_policy = ZeroPolicy(env_bl.action_space.shape)
+        renderer_bl = PreviewRenderer(env_bl.model, width=args.width, height=args.height)
+        baseline_path = os.path.join(phase_dir, "baseline.mp4")
+        renderer_bl.render_episode(
+            env_bl, zero_policy, baseline_path,
+            fps=args.fps, max_steps=args.max_steps, deterministic=True,
+        )
+        renderer_bl.close()
+        env_bl.close()
+        print(f"    Saved: {baseline_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize a trained agent at its latest curriculum stage"
+        description="Visualize a trained agent across all curriculum phases"
     )
     parser.add_argument(
         "--checkpoint",
@@ -150,8 +259,8 @@ def main():
     )
     parser.add_argument(
         "--output-dir",
-        default="renders_preview",
-        help="Output directory for MP4s (default: renders_preview)",
+        default="render_output",
+        help="Base output directory (default: render_output)",
     )
     parser.add_argument(
         "--max-steps",
@@ -178,6 +287,9 @@ def main():
     )
     args = parser.parse_args()
 
+    # --- Git info ---
+    git_short, git_full = _get_git_info()
+
     # --- Find checkpoint ---
     if args.checkpoint:
         checkpoint_path = args.checkpoint.replace(".zip", "")
@@ -193,97 +305,83 @@ def main():
                 f"Assuming final phase ({total_steps:,} steps)."
             )
     else:
-        # Check for locally cached checkpoints first, otherwise download
-        if os.path.isdir(LOCAL_CHECKPOINT_DIR) and glob.glob(
-            os.path.join(LOCAL_CHECKPOINT_DIR, "sisyphus_ppo_*.zip")
-        ):
-            checkpoint_path, total_steps = find_local_checkpoint(LOCAL_CHECKPOINT_DIR)
-            print(f"Found cached checkpoint locally.")
-        else:
+        # Always check Google Drive for the latest checkpoint
+        try:
             checkpoint_path, total_steps = download_latest_checkpoint(
                 DRIVE_FOLDER_URL, LOCAL_CHECKPOINT_DIR
             )
+        except Exception as e:
+            print(f"Could not access Google Drive ({e}), checking local cache...")
+            checkpoint_path, total_steps = find_local_checkpoint(LOCAL_CHECKPOINT_DIR)
 
-    # --- Determine curriculum phase ---
-    curriculum = CurriculumManager()
-    params = curriculum.get_params(total_steps)
+    # --- Create output folder ---
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"{git_short}_{total_steps}_{timestamp}"
+    run_dir = os.path.join(args.output_dir, run_name)
+    os.makedirs(run_dir, exist_ok=True)
+
+    # --- Determine phases to render ---
+    phases = _phases_up_to(total_steps)
+    current_phase = CurriculumManager().get_params(total_steps)
 
     print()
     print("Trained Agent Visualizer")
-    print("=" * 24)
+    print("=" * 40)
+    print(f"Git commit:       {git_short}")
     print(f"Checkpoint:       {os.path.basename(checkpoint_path)}")
     print(f"Training steps:   {total_steps:,}")
-    print(f"Curriculum phase: Phase {params.phase}")
-    print(f"  Slope:          {params.slope_deg} deg")
-    print(f"  Rock mass:      {params.rock_mass} kg")
-    print(f"  Infinite mode:  {params.infinite}")
-    print(f"  Alive bonus:    {params.alive_bonus}")
-    print(f"  Upright coef:   {params.upright_coef}")
-    print(f"  Forward push:   {params.forward_push_coef}")
+    print(f"Current phase:    Phase {current_phase.phase}")
+    print(f"Phases to render: {len(phases)} (I through {phases[-1]['phase']})")
+    print(f"Output:           {run_dir}/")
 
     # --- Load model ---
     print(f"\nLoading model...")
     model = PPO.load(checkpoint_path)
     print("Model loaded.")
 
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    # --- Render trained policy ---
-    phase_tag = f"phase{params.phase}_slope{params.slope_deg}_mass{params.rock_mass}"
-
     # Detect whether the checkpoint expects hand-distance observations
-    # by inspecting the saved observation space dimension.
     obs_dim = model.observation_space.shape[0]
-    obs_hand_dists = obs_dim > 56  # hand_dists adds 2 dims (56 → 58)
+    obs_hand_dists = obs_dim > 56  # hand_dists adds 2 dims (56 -> 58)
 
-    print(f"\nRendering trained policy ({args.max_steps} steps)...")
-    env = SisyphusEnv(
-        slope_deg=params.slope_deg,
-        rock_mass=params.rock_mass,
-        infinite_mode=params.infinite,
-        alive_bonus=params.alive_bonus,
-        upright_coef=params.upright_coef,
-        forward_push_coef=params.forward_push_coef,
-        max_steps=args.max_steps,
-        obs_hand_dists=obs_hand_dists,
-    )
-    renderer = PreviewRenderer(env.model, width=args.width, height=args.height)
-    policy_path = os.path.join(args.output_dir, f"trained_policy_{phase_tag}.mp4")
-    renderer.render_episode(
-        env, model, policy_path,
-        fps=args.fps, max_steps=args.max_steps, deterministic=True,
-    )
-    renderer.close()
-    env.close()
-    print(f"  Saved: {policy_path}")
+    # --- Render each phase ---
+    manifest_phases = []
+    for phase_entry in phases:
+        phase_tag = f"phase{phase_entry['phase']}_slope{phase_entry['slope']}_mass{phase_entry['mass']}"
+        phase_dir = os.path.join(run_dir, phase_tag)
+        os.makedirs(phase_dir, exist_ok=True)
 
-    # --- Render zero-action baseline ---
-    if not args.no_baseline:
-        print(f"\nRendering zero-action baseline...")
-        env_baseline = SisyphusEnv(
-            slope_deg=params.slope_deg,
-            rock_mass=params.rock_mass,
-            infinite_mode=params.infinite,
-            alive_bonus=params.alive_bonus,
-            upright_coef=params.upright_coef,
-            forward_push_coef=params.forward_push_coef,
-            max_steps=args.max_steps,
-            obs_hand_dists=obs_hand_dists,
+        _render_phase(
+            phase_entry, model, obs_hand_dists, phase_dir, args,
+            git_short, total_steps,
         )
-        zero_policy = ZeroPolicy(env_baseline.action_space.shape)
-        renderer_baseline = PreviewRenderer(
-            env_baseline.model, width=args.width, height=args.height
-        )
-        baseline_path = os.path.join(args.output_dir, f"baseline_{phase_tag}.mp4")
-        renderer_baseline.render_episode(
-            env_baseline, zero_policy, baseline_path,
-            fps=args.fps, max_steps=args.max_steps, deterministic=True,
-        )
-        renderer_baseline.close()
-        env_baseline.close()
-        print(f"  Saved: {baseline_path}")
 
-    print(f"\nDone. Videos saved to {args.output_dir}/")
+        manifest_phases.append({
+            "phase": phase_entry["phase"],
+            "slope_deg": phase_entry["slope"],
+            "rock_mass_kg": phase_entry["mass"],
+            "infinite_mode": phase_entry["infinite"],
+            "directory": phase_tag,
+        })
+
+    # --- Write manifest ---
+    manifest = {
+        "git_commit_short": git_short,
+        "git_commit_full": git_full,
+        "checkpoint": os.path.basename(checkpoint_path),
+        "total_training_steps": total_steps,
+        "timestamp": timestamp,
+        "max_steps_per_episode": args.max_steps,
+        "fps": args.fps,
+        "resolution": f"{args.width}x{args.height}",
+        "baseline_included": not args.no_baseline,
+        "phases": manifest_phases,
+    }
+    manifest_path = os.path.join(run_dir, "manifest.json")
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    print(f"\nDone. All outputs saved to {run_dir}/")
+    print(f"Manifest: {manifest_path}")
 
 
 if __name__ == "__main__":

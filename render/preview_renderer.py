@@ -55,7 +55,10 @@ class PreviewRenderer:
         T = len(qpos_seq)
 
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        writer = imageio.get_writer(output_path, fps=fps, codec="libx264")
+        writer = imageio.get_writer(
+            output_path, fps=fps, codec="libx264",
+            format="FFMPEG", macro_block_size=1,
+        )
 
         torso_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "torso")
 
@@ -80,8 +83,13 @@ class PreviewRenderer:
         fps: int = 30,
         max_steps: int = 1000,
         deterministic: bool = True,
-    ) -> str:
+        trajectory_path: str | None = None,
+        trajectory_metadata: dict | None = None,
+    ) -> tuple[str, str | None]:
         """Run one evaluation episode, render each frame, save as MP4.
+
+        Optionally records full simulation state as a .npz trajectory
+        suitable for Blender export.
 
         Args:
             env: A SisyphusEnv instance (unwrapped).
@@ -90,12 +98,24 @@ class PreviewRenderer:
             fps: Output framerate.
             max_steps: Max steps per episode.
             deterministic: Use deterministic policy.
+            trajectory_path: If set, save trajectory .npz to this path.
+            trajectory_metadata: Optional metadata dict stored in the .npz.
 
         Returns:
-            Path to the saved MP4.
+            (mp4_path, trajectory_path or None)
         """
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-        writer = imageio.get_writer(output_path, fps=fps, codec="libx264")
+        writer = imageio.get_writer(
+            output_path, fps=fps, codec="libx264",
+            format="FFMPEG", macro_block_size=1,
+        )
+
+        # Set up trajectory logger if requested
+        logger = None
+        if trajectory_path is not None:
+            from logging_utils.trajectory_logger import TrajectoryLogger
+            traj_dir = os.path.dirname(trajectory_path) or "."
+            logger = TrajectoryLogger(save_dir=traj_dir)
 
         obs, _ = env.reset()
         torso_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "torso")
@@ -105,6 +125,9 @@ class PreviewRenderer:
         self.model = env.model
         self._renderer = mujoco.Renderer(self.model, height=self.height, width=self.width)
 
+        death_frames = int(3.0 * fps)  # 3 seconds of post-death footage
+        zero_action = np.zeros(env.action_space.shape)
+
         try:
             for step in range(max_steps):
                 lookat = env.data.xpos[torso_id].copy()
@@ -113,12 +136,59 @@ class PreviewRenderer:
 
                 action, _ = policy.predict(obs, deterministic=deterministic)
                 obs, reward, terminated, truncated, info = env.step(action)
+
+                if logger is not None:
+                    logger.record_step(
+                        model=env.model,
+                        data=env.data,
+                        action=action,
+                        reward=reward,
+                        rock_body_id=env._rock_id,
+                        height_offset=env._total_height_accumulated,
+                    )
+
                 if terminated or truncated:
+                    # Continue rendering with zero actions so the
+                    # ragdoll / rock settle visibly for 3 more seconds.
+                    for _ in range(death_frames):
+                        env.data.ctrl[:] = 0.0
+                        mujoco.mj_step(env.model, env.data, nstep=5)
+
+                        lookat = env.data.xpos[torso_id].copy()
+                        frame = self._render_frame(lookat)
+                        writer.append_data(frame)
+
+                        if logger is not None:
+                            logger.record_step(
+                                model=env.model,
+                                data=env.data,
+                                action=zero_action,
+                                reward=0.0,
+                                rock_body_id=env._rock_id,
+                                height_offset=env._total_height_accumulated,
+                            )
                     break
         finally:
             writer.close()
 
-        return output_path
+        # Save trajectory
+        saved_traj = None
+        if logger is not None and len(logger._qpos) > 0:
+            meta = trajectory_metadata or {}
+            meta["fps"] = fps
+            # Save directly to the requested path
+            traj_filename = os.path.basename(trajectory_path)
+            logger.save_dir = os.path.dirname(trajectory_path) or "."
+            # Use save_episode with dummy IDs, then rename
+            temp_path = logger.save_episode(
+                episode_id=0, checkpoint_id=0, metadata=meta,
+            )
+            target = trajectory_path if trajectory_path.endswith(".npz") else trajectory_path + ".npz"
+            if temp_path != target:
+                os.replace(temp_path, target)
+            saved_traj = target
+
+        return output_path, saved_traj
 
     def close(self):
         if self._renderer is not None:

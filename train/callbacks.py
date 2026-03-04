@@ -28,6 +28,22 @@ class CurriculumCallback(BaseCallback):
         total_steps = self.num_timesteps
         changed, params = self.curriculum.check_transition(total_steps)
 
+        # Phase I gate: block transition until ep_len_mean > 600
+        if changed and self._last_phase == "I" and params.phase != "I":
+            ep_info_buffer = self.model.ep_info_buffer
+            if len(ep_info_buffer) > 0:
+                ep_len_mean = np.mean([ep["l"] for ep in ep_info_buffer])
+                if ep_len_mean < 600:
+                    if self.verbose:
+                        logger.info(
+                            f"Phase I gate: ep_len_mean={ep_len_mean:.0f} < 600, "
+                            f"staying in Phase I"
+                        )
+                    # Revert curriculum manager to Phase I
+                    self.curriculum._current_phase_idx = 0
+                    params = self.curriculum.get_params(0)
+                    changed = False
+
         if changed or self._last_phase is None:
             if self.verbose:
                 logger.info(
@@ -60,6 +76,21 @@ class CurriculumCallback(BaseCallback):
 
             self._last_phase = params.phase
 
+        # Log detailed metrics every 10000 steps
+        if self.num_timesteps % 10000 == 0:
+            infos = self.locals.get("infos", [])
+            if infos:
+                self.logger.record("metrics/rock_distance_mean",
+                    np.mean([i.get("rock_distance", 0) for i in infos]))
+                self.logger.record("metrics/torso_up_dot_mean",
+                    np.mean([i.get("torso_up_dot", 0) for i in infos]))
+                self.logger.record("metrics/com_vel_x_mean",
+                    np.mean([i.get("com_vel_x", 0) for i in infos]))
+                self.logger.record("metrics/rock_delta_x_mean",
+                    np.mean([i.get("rock_delta_x", 0) for i in infos]))
+                self.logger.record("metrics/hand_contact_rate",
+                    np.mean([i.get("hand_contact", 0) for i in infos]))
+
         return True
 
 
@@ -83,7 +114,7 @@ class TrajectoryRenderCallback(BaseCallback):
         self._episode_counter = 0
 
     def _on_step(self) -> bool:
-        if self.num_timesteps % self.save_freq != 0:
+        if self.n_calls % self.save_freq != 0:
             return True
 
         if self.verbose:

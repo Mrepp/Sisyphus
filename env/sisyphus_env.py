@@ -92,16 +92,17 @@ class SisyphusEnv(gym.Env):
         # Observation: humanoid qpos (skip root x), humanoid qvel, rock rel pos/vel, torso height, com vel
         obs_size = self._get_obs().shape[0]
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float64
+            low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
         )
         self.action_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(self._nu,), dtype=np.float64
+            low=-1.0, high=1.0, shape=(self._nu,), dtype=np.float32
         )
 
         # State tracking
         self._step_count = 0
         self._prev_rock_height = 0.0
         self._prev_rock_x = 0.0
+        self._prev_rock_dist = 0.0
         self._total_height_accumulated = 0.0
         self._reset_x = 1.0  # x position to teleport back to
 
@@ -228,7 +229,7 @@ class SisyphusEnv(gym.Env):
             r_hand_d, l_hand_d = self._hand_rock_distances()
             parts.append(np.array([r_hand_d, l_hand_d]))
 
-        obs = np.concatenate(parts)
+        obs = np.concatenate(parts).astype(np.float32)
         return obs
 
     # ------------------------------------------------------------------
@@ -260,33 +261,44 @@ class SisyphusEnv(gym.Env):
         fell = torso_z < 0.7
         fall_penalty = 500.0 if fell else 0.0
 
-        # Forward-push reward: encourage +x rock movement, penalise -x
+        # Forward-push reward: encourage +x rock movement (no decay, 10x)
         rock_x = rock_pos[0]
         delta_x_rock = rock_x - self._prev_rock_x
         self._prev_rock_x = rock_x
-        # Decay within episode so agent doesn't over-rely on shaping
-        episode_progress = self._step_count / self.max_steps  # 0→1
-        forward_decay = max(1.0 - episode_progress, 0.0)
-        forward_reward = self._forward_push_coef * delta_x_rock * forward_decay
+        forward_reward = 10.0 * delta_x_rock
 
         # Posture scaffolding (decayed via curriculum — zero by Phase III)
         alive_bonus = self._alive_bonus
         torso_xmat = self.data.xmat[self._torso_id].reshape(3, 3)
         torso_up_dot = torso_xmat[2, 2]  # z-component of torso z-axis vs world up
         upright_bonus = self._upright_coef * torso_up_dot
+        upright_gate = max(0.0, torso_up_dot) ** 2
 
-        # Hand-proximity reward: encourage hands near/on the rock
+        # Smooth height bonus: continuous gradient for "stay tall"
+        height_target = 1.25
+        smooth_height_bonus = self._upright_coef * 0.5 * min(torso_z / height_target, 1.0)
+
+        # COM forward velocity reward (capped, gated on uprightness)
+        com_vel_x = self.data.subtree_linvel[0][0]
+        walk_reward = self._upright_coef * 0.3 * min(max(com_vel_x, 0.0), 1.5) * upright_gate
+
+        # Idle penalty: discourage standing still (delayed onset after step 50)
+        idle_penalty = -0.1 if (com_vel_x < 0.05 and self._step_count > 50) else 0.0
+
+        # Approach reward: closing distance to rock
+        rock_dist = np.linalg.norm(rock_pos[:2] - torso_pos[:2])
+        approach_reward = 5.0 * (self._prev_rock_dist - rock_dist)
+        self._prev_rock_dist = rock_dist
+
+        # Contact reward: binary hand-on-rock, gated on uprightness
         right_dist, left_dist = self._hand_rock_distances()
-        hand_proximity = (
-            np.exp(-3.0 * right_dist)
-            + np.exp(-3.0 * left_dist)
-        )
-        hand_reward = self._hand_proximity_coef * hand_proximity
+        hand_contact = 1.0 if (right_dist < 0.05 or left_dist < 0.05) else 0.0
+        contact_reward = hand_contact * upright_gate
 
-        reward = (height_reward + forward_reward
-                  - torque_penalty - fall_penalty
-                  + alive_bonus + upright_bonus
-                  + hand_reward)
+        reward = (height_reward + forward_reward + approach_reward
+                  - torque_penalty - fall_penalty + idle_penalty
+                  + alive_bonus + upright_bonus + smooth_height_bonus
+                  + walk_reward + contact_reward)
 
         # Infinite illusion: teleport when approaching terrain end
         if self.infinite_mode and torso_pos[0] > 0.7 * self._terrain_length:
@@ -321,10 +333,18 @@ class SisyphusEnv(gym.Env):
             "alive_bonus": alive_bonus,
             "upright_bonus": upright_bonus,
             "forward_reward": forward_reward,
-            "hand_reward": hand_reward,
+            "contact_reward": contact_reward,
+            "hand_contact": hand_contact,
             "right_hand_dist": right_dist,
             "left_hand_dist": left_dist,
             "step_count": self._step_count,
+            "rock_distance": rock_dist,
+            "com_vel_x": com_vel_x,
+            "rock_delta_x": delta_x_rock,
+            "walk_reward": walk_reward,
+            "approach_reward": approach_reward,
+            "idle_penalty": idle_penalty,
+            "smooth_height_bonus": smooth_height_bonus,
         }
 
         obs = self._get_obs()
@@ -344,8 +364,8 @@ class SisyphusEnv(gym.Env):
         if self.model.nkey == 0:
             self.data.qpos[self._root_qpos_adr + 2] = 1.4  # z height
 
-        # Randomise rock position slightly
-        rock_x = self.np_random.uniform(1.3, 1.7)
+        # Randomise rock position (wider range to prevent overfitting)
+        rock_x = self.np_random.uniform(1.0, 2.5)
         rock_z = self._terrain_height_at_x(rock_x) + self._ROCK_RADIUS  # radius above terrain
         self.data.qpos[self._rock_qpos_adr] = rock_x
         self.data.qpos[self._rock_qpos_adr + 1] = 0.0
@@ -359,6 +379,10 @@ class SisyphusEnv(gym.Env):
         # Zero rock velocity so it starts at rest
         self.data.qvel[self._rock_qvel_adr: self._rock_qvel_adr + 6] = 0.0
 
+        # Randomize rock friction for robustness
+        rock_friction_mu = self.np_random.uniform(1.0, 2.0)
+        self.model.geom_friction[self._rock_geom_id][0] = rock_friction_mu
+
         mujoco.mj_forward(self.model, self.data)
 
         # Settle rock onto terrain surface, then kill residual velocity
@@ -371,6 +395,9 @@ class SisyphusEnv(gym.Env):
         self._total_height_accumulated = 0.0
         self._prev_rock_height = self.data.xpos[self._rock_id][2]
         self._prev_rock_x = self.data.xpos[self._rock_id][0]
+        torso_pos = self.data.xpos[self._torso_id]
+        rock_pos = self.data.xpos[self._rock_id]
+        self._prev_rock_dist = np.linalg.norm(rock_pos[:2] - torso_pos[:2])
 
         obs = self._get_obs()
         info = {

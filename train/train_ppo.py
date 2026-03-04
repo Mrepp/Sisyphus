@@ -9,7 +9,9 @@ Usage from notebook:
 
 import os
 import logging
+import multiprocessing
 
+import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
@@ -20,6 +22,73 @@ from train.curriculum import CurriculumManager
 from train.callbacks import CurriculumCallback, TrajectoryRenderCallback
 
 logger = logging.getLogger(__name__)
+
+
+def get_hardware_config(
+    num_envs: int | None = None,
+    profile: str = "auto",
+) -> dict:
+    """Return recommended training hyperparameters for the detected hardware.
+
+    Args:
+        num_envs: Override number of parallel environments. If None, auto-detect.
+        profile: One of "colab_a100", "dedicated_a100", "cpu", or "auto".
+
+    Returns:
+        Dict with keys: num_envs, n_steps, batch_size, device, net_arch, profile.
+    """
+    cpu_count = multiprocessing.cpu_count()
+    has_cuda = torch.cuda.is_available()
+
+    if profile == "auto":
+        if has_cuda:
+            if cpu_count <= 12:
+                profile = "colab_a100"
+            else:
+                profile = "dedicated_a100"
+        else:
+            profile = "cpu"
+
+    configs = {
+        "cpu": {
+            "num_envs": min(cpu_count, 16),
+            "n_steps": 2048,
+            "batch_size": 1024,
+            "device": "cpu",
+            "net_arch": [256, 256],
+        },
+        "colab_a100": {
+            "num_envs": 10,
+            "n_steps": 4096,
+            "batch_size": 2048,
+            "device": "cuda",
+            "net_arch": [512, 512],
+        },
+        "dedicated_a100": {
+            "num_envs": min(cpu_count - 4, 64),
+            "n_steps": 2048,
+            "batch_size": 4096,
+            "device": "cuda",
+            "net_arch": [512, 512],
+        },
+    }
+
+    config = configs[profile]
+    if num_envs is not None:
+        config["num_envs"] = num_envs
+    config["profile"] = profile
+
+    return config
+
+
+def setup_torch_optimizations():
+    """Configure PyTorch for optimal A100 performance."""
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        logger.info(f"CUDA device: {torch.cuda.get_device_name(0)}")
+        logger.info(f"TF32 matmul enabled: {torch.backends.cuda.matmul.allow_tf32}")
 
 
 def make_env(slope: float, rock_mass: float, rank: int, max_steps: int = 1000):
@@ -53,16 +122,24 @@ def create_env(
 def create_model(
     vec_env: VecNormalize,
     tensorboard_log: str = "logs/tensorboard",
+    hardware_config: dict | None = None,
     **kwargs,
 ) -> PPO:
     """Create a PPO model with Sisyphus-tuned defaults.
 
-    Any kwarg overrides the defaults below.
+    Args:
+        vec_env: Vectorized environment.
+        tensorboard_log: TensorBoard log directory.
+        hardware_config: Dict from get_hardware_config() to override n_steps,
+            batch_size, device, and net_arch. Any explicit kwarg still wins.
     """
+    hw = hardware_config or {}
+    net_arch = hw.get("net_arch", [256, 256])
+
     defaults = dict(
-        learning_rate=lambda f: 3e-4 * f,
-        n_steps=2048,
-        batch_size=512,
+        learning_rate=lambda f: 2e-4 * f,
+        n_steps=hw.get("n_steps", 2048),
+        batch_size=hw.get("batch_size", 1024),
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,
@@ -70,8 +147,9 @@ def create_model(
         target_kl=0.03,
         ent_coef=0.01,
         verbose=1,
+        device=hw.get("device", "auto"),
         tensorboard_log=tensorboard_log,
-        policy_kwargs=dict(net_arch=[dict(pi=[256, 256], vf=[256, 256])]),
+        policy_kwargs=dict(net_arch=[dict(pi=net_arch, vf=net_arch)]),
     )
     defaults.update(kwargs)
     return PPO("MlpPolicy", vec_env, **defaults)
@@ -126,7 +204,7 @@ def train(
     callbacks.append(
         TrajectoryRenderCallback(
             eval_env=eval_env,
-            save_freq=checkpoint_freq,
+            save_freq=save_freq,
             replay_dir=replay_dir,
             render_dir=render_dir,
             verbose=1,
