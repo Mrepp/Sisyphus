@@ -13,3 +13,5 @@ blender_project/
 dist/
 build/
 .env
+.sisyphus/
+checkpoints/

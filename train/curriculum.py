@@ -1,9 +1,13 @@
 """Curriculum schedule for Sisyphus training.
 
 Manages progressive difficulty: slope angle, rock mass, and infinite mode.
+Phase promotion is performance-gated using rolling episode metrics.
 """
 
+from collections import deque
 from dataclasses import dataclass
+
+import numpy as np
 
 
 @dataclass
@@ -15,39 +19,58 @@ class CurriculumParams:
     alive_bonus: float = 0.0
     upright_coef: float = 0.0
     forward_push_coef: float = 5.0
+    walk_only_mode: bool = False
 
 
 # Default schedule matching the training plan.
-# alive_bonus / upright_coef provide posture scaffolding that decays to zero,
-# so the agent bootstraps standing quickly but still discovers its own gait.
+# Phase promotion is metric-gated: rolling mean promotion_score must exceed
+# promotion_threshold, after at least min_steps in the phase.
+# max_steps is a safety cap — promotes even if metrics aren't met.
 SCHEDULE = [
-    # Phase I: Strong posture scaffolding. Stays until ep_len_mean > 600.
-    {"phase": "I",   "slope": 0.0,  "mass": 20.0,  "end_step": 5_000_000,
-     "infinite": False, "alive_bonus": 3.0, "upright_coef": 3.0, "forward_push_coef": 5.0},
-    # Phase II: Add slope. Reduce scaffolding gradually.
-    {"phase": "II",  "slope": 5.0,  "mass": 35.0,  "end_step": 15_000_000,
-     "infinite": False, "alive_bonus": 1.5, "upright_coef": 1.0, "forward_push_coef": 5.0},
+    # Phase I: Strong posture scaffolding. Walk-only for first walk_only_steps.
+    {"phase": "I",   "slope": 0.0,  "mass": 20.0,
+     "infinite": False, "alive_bonus": 3.0, "upright_coef": 3.0,
+     "forward_push_coef": 5.0,
+     "promotion_metric": "promotion_score", "promotion_threshold": 6.0,
+     "min_steps": 2_000_000, "max_steps": 20_000_000,
+     "walk_only_steps": 3_000_000},
+    # Phase II: Add slope. Reduce scaffolding.
+    {"phase": "II",  "slope": 5.0,  "mass": 35.0,
+     "infinite": False, "alive_bonus": 1.5, "upright_coef": 1.0,
+     "forward_push_coef": 5.0,
+     "promotion_metric": "promotion_score", "promotion_threshold": 6.0,
+     "min_steps": 5_000_000, "max_steps": 30_000_000},
     # Phase III: Steeper, heavier. Minimal scaffolding.
-    {"phase": "III", "slope": 10.0, "mass": 50.0,  "end_step": 30_000_000,
-     "infinite": False, "alive_bonus": 0.5, "upright_coef": 0.3, "forward_push_coef": 5.0},
-    # Phase IV: Full difficulty. Infinite mode.
-    {"phase": "IV",  "slope": 15.0, "mass": 40.0,  "end_step": 50_000_000,
-     "infinite": True,  "alive_bonus": 0.0, "upright_coef": 0.2, "forward_push_coef": 5.0},
+    {"phase": "III", "slope": 10.0, "mass": 50.0,
+     "infinite": False, "alive_bonus": 0.5, "upright_coef": 0.3,
+     "forward_push_coef": 5.0,
+     "promotion_metric": "promotion_score", "promotion_threshold": 6.0,
+     "min_steps": 5_000_000, "max_steps": 40_000_000},
+    # Phase IV: Full difficulty. Infinite mode (terminal phase).
+    {"phase": "IV",  "slope": 15.0, "mass": 40.0,
+     "infinite": True,  "alive_bonus": 0.0, "upright_coef": 0.2,
+     "forward_push_coef": 5.0,
+     "promotion_metric": None, "promotion_threshold": None,
+     "min_steps": None, "max_steps": None},
 ]
 
 
 class CurriculumManager:
-    def __init__(self, schedule=None, fixed_phase: str | None = None):
+    def __init__(self, schedule=None, fixed_phase: str | None = None,
+                 initial_timestep: int = 0):
         self.schedule = schedule or SCHEDULE
         self._current_phase_idx = 0
         self._fixed_phase = fixed_phase
+        self._phase_start_step = initial_timestep  # total steps when current phase started
+        self._promotion_scores = deque(maxlen=50)  # rolling window of promotion scores
+
         if fixed_phase is not None:
             # Set initial index to match fixed phase
             self._current_phase_idx = next(
                 i for i, e in enumerate(self.schedule) if e["phase"] == fixed_phase
             )
 
-    def _params_from_entry(self, entry: dict) -> CurriculumParams:
+    def _params_from_entry(self, entry: dict, walk_only_override: bool = False) -> CurriculumParams:
         return CurriculumParams(
             phase=entry["phase"],
             slope_deg=entry["slope"],
@@ -56,29 +79,95 @@ class CurriculumManager:
             alive_bonus=entry.get("alive_bonus", 0.0),
             upright_coef=entry.get("upright_coef", 0.0),
             forward_push_coef=entry.get("forward_push_coef", 5.0),
+            walk_only_mode=walk_only_override,
         )
+
+    @property
+    def current_phase_idx(self) -> int:
+        return self._current_phase_idx
+
+    @property
+    def current_entry(self) -> dict:
+        if self._fixed_phase is not None:
+            return next(e for e in self.schedule if e["phase"] == self._fixed_phase)
+        return self.schedule[self._current_phase_idx]
 
     def get_params(self, total_steps: int) -> CurriculumParams:
-        """Return curriculum parameters for the given total step count."""
+        """Return curriculum parameters for the current phase."""
+        entry = self.current_entry
+
+        # Check if we're in the walk-only stage of Phase I
+        walk_only = False
+        walk_only_steps = entry.get("walk_only_steps", 0)
+        if walk_only_steps > 0:
+            steps_in_phase = total_steps - self._phase_start_step
+            if steps_in_phase < walk_only_steps:
+                walk_only = True
+
+        return self._params_from_entry(entry, walk_only_override=walk_only)
+
+    def add_promotion_score(self, score: float):
+        """Record an episode's promotion score for the rolling window."""
+        self._promotion_scores.append(score)
+
+    def get_rolling_promotion_score(self) -> float | None:
+        """Return the rolling mean promotion score, or None if not enough data."""
+        if len(self._promotion_scores) < 10:
+            return None
+        return float(np.mean(self._promotion_scores))
+
+    def check_promotion(self, total_steps: int) -> bool:
+        """Check if the current phase should be promoted based on metrics.
+
+        Returns True if promotion criteria are met.
+        """
         if self._fixed_phase is not None:
-            entry = next(e for e in self.schedule if e["phase"] == self._fixed_phase)
-            return self._params_from_entry(entry)
-        for entry in self.schedule:
-            if total_steps < entry["end_step"]:
-                return self._params_from_entry(entry)
-        # Past all phases — stay on last
-        return self._params_from_entry(self.schedule[-1])
+            return False
+
+        entry = self.schedule[self._current_phase_idx]
+
+        # Terminal phase — no promotion
+        if entry.get("promotion_metric") is None:
+            return False
+
+        steps_in_phase = total_steps - self._phase_start_step
+        min_steps = entry.get("min_steps", 0)
+        max_steps = entry.get("max_steps")
+
+        # Safety cap: promote if we've exceeded max_steps
+        if max_steps is not None and steps_in_phase >= max_steps:
+            return True
+
+        # Not enough steps yet
+        if steps_in_phase < min_steps:
+            return False
+
+        # Check metric threshold
+        rolling_score = self.get_rolling_promotion_score()
+        if rolling_score is None:
+            return False
+
+        threshold = entry.get("promotion_threshold", float("inf"))
+        return rolling_score >= threshold
+
+    def promote(self, total_steps: int) -> CurriculumParams:
+        """Advance to the next phase. Returns new params."""
+        if self._current_phase_idx < len(self.schedule) - 1:
+            self._current_phase_idx += 1
+            self._phase_start_step = total_steps
+            self._promotion_scores.clear()
+        return self.get_params(total_steps)
 
     def check_transition(self, total_steps: int) -> tuple[bool, CurriculumParams]:
-        """Check if a phase transition occurred. Returns (changed, new_params)."""
+        """Check if a phase transition should occur. Returns (changed, new_params).
+
+        This method checks metric-gated promotion and walk-only mode transitions.
+        """
         if self._fixed_phase is not None:
-            # Manual mode: never auto-transition
             return False, self.get_params(total_steps)
-        params = self.get_params(total_steps)
-        idx = next(
-            (i for i, e in enumerate(self.schedule) if total_steps < e["end_step"]),
-            len(self.schedule) - 1,
-        )
-        changed = idx != self._current_phase_idx
-        self._current_phase_idx = idx
-        return changed, params
+
+        if self.check_promotion(total_steps):
+            params = self.promote(total_steps)
+            return True, params
+
+        return False, self.get_params(total_steps)

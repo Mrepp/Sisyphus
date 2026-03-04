@@ -1,20 +1,23 @@
 """Visualize a trained agent across all curriculum phases it has completed.
 
-Downloads the latest PPO checkpoint from a Google Drive shared folder,
-renders the trained policy at each curriculum phase (plus zero-action
-baselines), and exports Blender-ready data for each phase.
+Loads a PPO checkpoint, renders the trained policy at each curriculum phase
+(plus zero-action baselines), and exports Blender-ready data for each phase.
+
+By default, connects to Google Drive, downloads the latest checkpoint, and
+renders it. Use --steps to pick a specific checkpoint, or --checkpoint for
+a local file.
 
 Outputs are organized in a git-commit-tagged folder under render_output/.
 
 Usage:
-    python scripts/visualize_trained_agent.py
+    python scripts/visualize_trained_agent.py                    # latest from Drive
+    python scripts/visualize_trained_agent.py --steps 52331648   # specific step count
+    python scripts/visualize_trained_agent.py --checkpoint /local/path/to/model
     python scripts/visualize_trained_agent.py --no-baseline --max-steps 2000
-    python scripts/visualize_trained_agent.py --checkpoint /local/path/to/sisyphus_ppo_5000000_steps
 """
 
 import argparse
 import datetime
-import glob
 import json
 import os
 import re
@@ -34,7 +37,6 @@ from render.preview_renderer import PreviewRenderer
 from train.curriculum import SCHEDULE, CurriculumManager
 
 
-DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1bq_jR1oP4aUvxDi1A8gMRFvlgNIQKEaZ"
 LOCAL_CHECKPOINT_DIR = os.path.join(_PROJECT_ROOT, "checkpoints")
 
 
@@ -61,110 +63,13 @@ def _get_git_info() -> tuple[str, str]:
         return "unknown", "unknown"
 
 
-def download_latest_checkpoint(folder_url: str, local_dir: str) -> tuple[str, int]:
-    """List a Google Drive shared folder, find the highest-step checkpoint,
-    and download only that file.
-
-    Returns:
-        (checkpoint_path_without_extension, total_steps)
-    """
-    import gdown
-
-    os.makedirs(local_dir, exist_ok=True)
-
-    # List folder contents without downloading
-    print(f"Scanning Google Drive folder for checkpoints...")
-    file_list = gdown.download_folder(folder_url, skip_download=True, quiet=True)
-
-    if not file_list:
-        raise FileNotFoundError(
-            f"No files found in Google Drive folder. "
-            f"Train a model first using sisyphus_train.ipynb."
-        )
-
-    # Parse step counts and find the latest
-    step_re = re.compile(r"sisyphus_ppo_(\d+)_steps\.zip")
-    parsed = []
-    final_entry = None
-    for entry in file_list:
-        name = os.path.basename(entry.path)
-        if name == "sisyphus_ppo_final.zip":
-            final_entry = entry
-            continue
-        match = step_re.search(name)
-        if match:
-            parsed.append((int(match.group(1)), entry))
-
-    # Prefer _final, otherwise highest step count
-    if final_entry:
-        best_entry = final_entry
-        total_steps = SCHEDULE[-1]["end_step"]
-    elif parsed:
-        parsed.sort(key=lambda x: x[0], reverse=True)
-        total_steps, best_entry = parsed[0]
-    else:
-        raise FileNotFoundError(
-            "Found files in Drive folder but none match the expected checkpoint "
-            'naming pattern "sisyphus_ppo_{steps}_steps.zip".'
-        )
-
-    filename = os.path.basename(best_entry.path)
-    local_path = os.path.join(local_dir, filename)
-
-    # Skip download if already cached locally
-    if os.path.exists(local_path):
-        print(f"Using cached checkpoint: {filename}")
-    else:
-        print(f"Downloading {filename}...")
-        gdown.download(id=best_entry.id, output=local_path, quiet=False)
-        print(f"Downloaded to {local_path}")
-
-    return local_path.replace(".zip", ""), total_steps
-
-
-def find_local_checkpoint(checkpoint_dir: str) -> tuple[str, int]:
-    """Find the latest checkpoint in a local directory by step count.
-
-    Returns:
-        (checkpoint_path_without_extension, total_steps)
-    """
-    final_path = os.path.join(checkpoint_dir, "sisyphus_ppo_final.zip")
-    if os.path.exists(final_path):
-        return final_path.replace(".zip", ""), SCHEDULE[-1]["end_step"]
-
-    files = glob.glob(os.path.join(checkpoint_dir, "sisyphus_ppo_*.zip"))
-    if not files:
-        raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}.")
-
-    step_re = re.compile(r"sisyphus_ppo_(\d+)_steps\.zip")
-    parsed = []
-    for f in files:
-        match = step_re.search(os.path.basename(f))
-        if match:
-            parsed.append((int(match.group(1)), f))
-
-    if not parsed:
-        raise FileNotFoundError(
-            f"Found .zip files but none match the expected naming pattern "
-            f'in {checkpoint_dir}.'
-        )
-
-    parsed.sort(key=lambda x: x[0], reverse=True)
-    latest_steps, latest_path = parsed[0]
-    return latest_path.replace(".zip", ""), latest_steps
-
-
 def _phases_up_to(total_steps: int) -> list[dict]:
-    """Return all curriculum phases the checkpoint has reached, in order.
+    """Return all curriculum phases to render, in order.
 
-    Includes completed phases and the current (possibly in-progress) phase.
+    With metric-gated promotion we can't determine the exact phase from
+    step count alone, so we return all phases — harmless to render extra ones.
     """
-    phases = []
-    for entry in SCHEDULE:
-        phases.append(entry)
-        if total_steps < entry["end_step"]:
-            break  # this is the current phase — include it and stop
-    return phases
+    return list(SCHEDULE)
 
 
 def _render_phase(
@@ -252,10 +157,16 @@ def main():
         description="Visualize a trained agent across all curriculum phases"
     )
     parser.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        help="Training step count of a specific checkpoint to load. "
+             "Without this, the latest checkpoint is used.",
+    )
+    parser.add_argument(
         "--checkpoint",
         default=None,
-        help="Path to a specific local checkpoint (without .zip). "
-        "Skips Google Drive download.",
+        help="Path to a local model .zip file (e.g. checkpoints/sisyphus_ppo_52331648_steps.zip).",
     )
     parser.add_argument(
         "--output-dir",
@@ -285,6 +196,12 @@ def main():
         action="store_true",
         help="Skip rendering the zero-action baseline",
     )
+    parser.add_argument(
+        "--drive-folder-id",
+        default=None,
+        help="Google Drive folder ID for the checkpoints folder. "
+             "Cached after first use.",
+    )
     args = parser.parse_args()
 
     # --- Git info ---
@@ -292,27 +209,54 @@ def main():
 
     # --- Find checkpoint ---
     if args.checkpoint:
+        # Explicit local path
         checkpoint_path = args.checkpoint.replace(".zip", "")
         match = re.search(r"sisyphus_ppo_(\d+)_steps", checkpoint_path)
         if match:
             total_steps = int(match.group(1))
         elif "final" in os.path.basename(checkpoint_path):
-            total_steps = SCHEDULE[-1]["end_step"]
+            total_steps = 100_000_000
         else:
-            total_steps = SCHEDULE[-1]["end_step"]
+            total_steps = 100_000_000
             print(
                 f"Warning: Could not parse step count from checkpoint name. "
                 f"Assuming final phase ({total_steps:,} steps)."
             )
+    elif args.steps is not None:
+        # Specific step count — check local, then Drive
+        total_steps = args.steps
+        filename = f"sisyphus_ppo_{total_steps}_steps.zip"
+        local_path = os.path.join(LOCAL_CHECKPOINT_DIR, filename)
+
+        if not os.path.exists(local_path):
+            from scripts.drive_utils import download_checkpoint
+            try:
+                local_path = download_checkpoint(
+                    filename, LOCAL_CHECKPOINT_DIR,
+                    args.drive_folder_id,
+                )
+            except Exception as e:
+                print(f"Error: {e}")
+                sys.exit(1)
+
+        checkpoint_path = local_path.replace(".zip", "")
+        print(f"Using checkpoint: {os.path.basename(local_path)}")
     else:
-        # Always check Google Drive for the latest checkpoint
+        # No args — get the latest checkpoint from Drive
+        from scripts.drive_utils import download_latest_checkpoint
         try:
-            checkpoint_path, total_steps = download_latest_checkpoint(
-                DRIVE_FOLDER_URL, LOCAL_CHECKPOINT_DIR
+            local_path, total_steps = download_latest_checkpoint(
+                LOCAL_CHECKPOINT_DIR, args.drive_folder_id,
             )
         except Exception as e:
-            print(f"Could not access Google Drive ({e}), checking local cache...")
-            checkpoint_path, total_steps = find_local_checkpoint(LOCAL_CHECKPOINT_DIR)
+            print(f"Error: {e}")
+            sys.exit(1)
+
+        if total_steps == 0:
+            total_steps = 100_000_000
+
+        checkpoint_path = local_path.replace(".zip", "")
+        print(f"Using checkpoint: {os.path.basename(local_path)}")
 
     # --- Create output folder ---
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -341,7 +285,10 @@ def main():
 
     # Detect whether the checkpoint expects hand-distance observations
     obs_dim = model.observation_space.shape[0]
-    obs_hand_dists = obs_dim > 56  # hand_dists adds 2 dims (56 -> 58)
+    # Base obs = 60 dims (qpos + qvel + rock_rel + rock_vel + torso_h + com_vel
+    #   + foot contacts + agent_touching + rock_y).
+    # With obs_hand_dists=True: +2 dims → 62 total.
+    obs_hand_dists = obs_dim > 60
 
     # --- Render each phase ---
     manifest_phases = []

@@ -11,6 +11,11 @@ Usage:
 
 import argparse
 import os
+import sys
+
+# Ensure project root is on the path when running as a script.
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _PROJECT_ROOT)
 
 import imageio
 import mujoco
