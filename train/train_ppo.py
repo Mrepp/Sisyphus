@@ -7,19 +7,20 @@ Usage from notebook:
     train(model, total_timesteps=5_000_000, ...)
 """
 
+from __future__ import annotations
+
 import os
 import logging
 import multiprocessing
 import platform
-
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import CheckpointCallback
+from typing import TYPE_CHECKING
 
 from env.sisyphus_env import SisyphusEnv
 from train.curriculum import CurriculumManager
-from train.callbacks import CurriculumCallback, TrajectoryRenderCallback
+
+if TYPE_CHECKING:
+    from stable_baselines3 import PPO
+    from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +99,8 @@ def setup_torch_optimizations():
 def make_env(slope: float, rock_mass: float, rank: int, max_steps: int = 1000):
     """Factory for creating a single env instance (used by SubprocVecEnv)."""
     def _init():
+        from stable_baselines3.common.monitor import Monitor
+
         env = SisyphusEnv(slope_deg=slope, rock_mass=rock_mass, max_steps=max_steps)
         env = Monitor(env)
         return env
@@ -117,9 +120,15 @@ def create_env(
     Returns:
         VecNormalize wrapping SubprocVecEnv.
     """
-    # Use "forkserver" on macOS to avoid C++ static-init crashes
-    # (MuJoCo + PyTorch in forked subprocesses trigger recursive init).
-    start_method = "forkserver" if platform.system() == "Darwin" else "forkserver"
+    from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
+
+    # macOS: "forkserver" avoids C++ static-init crashes (MuJoCo + PyTorch).
+    # Linux/Colab: "spawn" gives each subprocess a clean CUDA context,
+    # preventing cuBLAS factory double-registration.
+    if platform.system() == "Darwin":
+        start_method = "forkserver"
+    else:
+        start_method = "spawn"
 
     env_fns = [make_env(slope, rock_mass, i, max_steps) for i in range(num_envs)]
     vec_env = SubprocVecEnv(env_fns, start_method=start_method)
@@ -141,6 +150,8 @@ def create_model(
         hardware_config: Dict from get_hardware_config() to override n_steps,
             batch_size, device, and net_arch. Any explicit kwarg still wins.
     """
+    from stable_baselines3 import PPO
+
     hw = hardware_config or {}
     net_arch = hw.get("net_arch", [256, 256])
 
@@ -173,6 +184,8 @@ def train(
     use_curriculum: bool = True,
     curriculum: CurriculumManager | None = None,
     eval_env: SisyphusEnv | None = None,
+    render_enabled: bool = True,
+    reset_num_timesteps: bool = True,
 ):
     """Run the PPO training loop.
 
@@ -186,7 +199,12 @@ def train(
         use_curriculum: Enable curriculum transitions.
         curriculum: CurriculumManager instance (created if None).
         eval_env: Unwrapped SisyphusEnv for evaluation (created if None).
+        render_enabled: Render preview MP4s at each checkpoint. Disable on Colab.
+        reset_num_timesteps: Reset step counter (False for chunked training).
     """
+    from stable_baselines3.common.callbacks import CheckpointCallback
+    from train.callbacks import CurriculumCallback, TrajectoryRenderCallback
+
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(replay_dir, exist_ok=True)
     os.makedirs(render_dir, exist_ok=True)
@@ -215,12 +233,17 @@ def train(
             save_freq=save_freq,
             replay_dir=replay_dir,
             render_dir=render_dir,
+            render_enabled=render_enabled,
             verbose=1,
         )
     )
 
     logger.info(f"Starting training: {total_timesteps} steps, {num_envs} envs")
-    model.learn(total_timesteps=total_timesteps, callback=callbacks)
+    model.learn(
+        total_timesteps=total_timesteps,
+        callback=callbacks,
+        reset_num_timesteps=reset_num_timesteps,
+    )
     logger.info("Training complete.")
 
     return model
@@ -228,6 +251,8 @@ def train(
 
 def load_model(path: str, vec_env: VecNormalize | None = None) -> PPO:
     """Load a saved PPO checkpoint."""
+    from stable_baselines3 import PPO
+
     return PPO.load(path, env=vec_env)
 
 
@@ -238,4 +263,6 @@ def save_vec_normalize(vec_env: VecNormalize, path: str):
 
 def load_vec_normalize(vec_env: SubprocVecEnv, path: str) -> VecNormalize:
     """Load VecNormalize statistics onto a vectorized env."""
+    from stable_baselines3.common.vec_env import VecNormalize
+
     return VecNormalize.load(path, vec_env)

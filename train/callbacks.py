@@ -103,6 +103,7 @@ class TrajectoryRenderCallback(BaseCallback):
         save_freq: int = 500_000,
         replay_dir: str = "replays",
         render_dir: str = "renders_preview",
+        render_enabled: bool = True,
         verbose: int = 1,
     ):
         super().__init__(verbose)
@@ -110,6 +111,7 @@ class TrajectoryRenderCallback(BaseCallback):
         self.save_freq = save_freq
         self.replay_dir = replay_dir
         self.render_dir = render_dir
+        self.render_enabled = render_enabled
         self._checkpoint_counter = 0
         self._episode_counter = 0
 
@@ -165,21 +167,22 @@ class TrajectoryRenderCallback(BaseCallback):
         if self.verbose:
             logger.info(f"Saved trajectory: {traj_path}")
 
-        # Render preview MP4
-        try:
-            from render.preview_renderer import PreviewRenderer
+        # Render preview MP4 (skip on Colab to avoid OOM/GPU stalls)
+        if self.render_enabled:
+            try:
+                from render.preview_renderer import PreviewRenderer
 
-            renderer = PreviewRenderer(model, width=1920, height=1080)
-            mp4_path = os.path.join(
-                self.render_dir,
-                f"preview_step_{self.num_timesteps}.mp4",
-            )
-            os.makedirs(self.render_dir, exist_ok=True)
-            renderer.render_trajectory(traj_path, mp4_path, fps=30)
-            renderer.close()
-            if self.verbose:
-                logger.info(f"Saved preview: {mp4_path}")
-        except Exception as e:
-            logger.warning(f"Preview render failed: {e}")
+                renderer = PreviewRenderer(model, width=1920, height=1080)
+                mp4_path = os.path.join(
+                    self.render_dir,
+                    f"preview_step_{self.num_timesteps}.mp4",
+                )
+                os.makedirs(self.render_dir, exist_ok=True)
+                renderer.render_trajectory(traj_path, mp4_path, fps=30)
+                renderer.close()
+                if self.verbose:
+                    logger.info(f"Saved preview: {mp4_path}")
+            except Exception as e:
+                logger.warning(f"Preview render failed: {e}")
 
         return True
