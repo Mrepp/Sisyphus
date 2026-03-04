@@ -28,22 +28,6 @@ class CurriculumCallback(BaseCallback):
         total_steps = self.num_timesteps
         changed, params = self.curriculum.check_transition(total_steps)
 
-        # Phase I gate: block transition until ep_len_mean > 600
-        if changed and self._last_phase == "I" and params.phase != "I":
-            ep_info_buffer = self.model.ep_info_buffer
-            if len(ep_info_buffer) > 0:
-                ep_len_mean = np.mean([ep["l"] for ep in ep_info_buffer])
-                if ep_len_mean < 600:
-                    if self.verbose:
-                        logger.info(
-                            f"Phase I gate: ep_len_mean={ep_len_mean:.0f} < 600, "
-                            f"staying in Phase I"
-                        )
-                    # Revert curriculum manager to Phase I
-                    self.curriculum._current_phase_idx = 0
-                    params = self.curriculum.get_params(0)
-                    changed = False
-
         if changed or self._last_phase is None:
             if self.verbose:
                 logger.info(

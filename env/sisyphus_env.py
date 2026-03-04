@@ -142,7 +142,7 @@ class SisyphusEnv(gym.Env):
         # Row 0 = far end (+x), row nrow-1 = near end (0).  MuJoCo hfield:
         # row index 0 corresponds to +x, row nrow-1 to -x.
         # We want height increasing with +x (uphill direction).
-        row_heights = np.linspace(0, 1, nrow)  # 0 at near, 1 at far
+        row_heights = np.linspace(1, 0, nrow)  # 1 at row 0 (+x, uphill), 0 at row nrow-1 (-x, near)
 
         # Scale so that max physical height = tan(slope) * terrain_length
         max_h = np.tan(slope_rad) * self._terrain_length

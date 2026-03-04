@@ -37,9 +37,15 @@ SCHEDULE = [
 
 
 class CurriculumManager:
-    def __init__(self, schedule=None):
+    def __init__(self, schedule=None, fixed_phase: str | None = None):
         self.schedule = schedule or SCHEDULE
         self._current_phase_idx = 0
+        self._fixed_phase = fixed_phase
+        if fixed_phase is not None:
+            # Set initial index to match fixed phase
+            self._current_phase_idx = next(
+                i for i, e in enumerate(self.schedule) if e["phase"] == fixed_phase
+            )
 
     def _params_from_entry(self, entry: dict) -> CurriculumParams:
         return CurriculumParams(
@@ -54,6 +60,9 @@ class CurriculumManager:
 
     def get_params(self, total_steps: int) -> CurriculumParams:
         """Return curriculum parameters for the given total step count."""
+        if self._fixed_phase is not None:
+            entry = next(e for e in self.schedule if e["phase"] == self._fixed_phase)
+            return self._params_from_entry(entry)
         for entry in self.schedule:
             if total_steps < entry["end_step"]:
                 return self._params_from_entry(entry)
@@ -62,6 +71,9 @@ class CurriculumManager:
 
     def check_transition(self, total_steps: int) -> tuple[bool, CurriculumParams]:
         """Check if a phase transition occurred. Returns (changed, new_params)."""
+        if self._fixed_phase is not None:
+            # Manual mode: never auto-transition
+            return False, self.get_params(total_steps)
         params = self.get_params(total_steps)
         idx = next(
             (i for i, e in enumerate(self.schedule) if total_steps < e["end_step"]),
