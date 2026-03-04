@@ -10,8 +10,8 @@ Usage from notebook:
 import os
 import logging
 import multiprocessing
+import platform
 
-import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
@@ -37,6 +37,8 @@ def get_hardware_config(
     Returns:
         Dict with keys: num_envs, n_steps, batch_size, device, net_arch, profile.
     """
+    import torch  # lazy import to avoid subprocess C++ conflicts
+
     cpu_count = multiprocessing.cpu_count()
     has_cuda = torch.cuda.is_available()
 
@@ -83,6 +85,8 @@ def get_hardware_config(
 
 def setup_torch_optimizations():
     """Configure PyTorch for optimal A100 performance."""
+    import torch  # lazy import to avoid subprocess C++ conflicts
+
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -113,8 +117,12 @@ def create_env(
     Returns:
         VecNormalize wrapping SubprocVecEnv.
     """
+    # Use "forkserver" on macOS to avoid C++ static-init crashes
+    # (MuJoCo + PyTorch in forked subprocesses trigger recursive init).
+    start_method = "forkserver" if platform.system() == "Darwin" else "forkserver"
+
     env_fns = [make_env(slope, rock_mass, i, max_steps) for i in range(num_envs)]
-    vec_env = SubprocVecEnv(env_fns)
+    vec_env = SubprocVecEnv(env_fns, start_method=start_method)
     vec_env = VecNormalize(vec_env, norm_obs=norm_obs, norm_reward=norm_reward)
     return vec_env
 
