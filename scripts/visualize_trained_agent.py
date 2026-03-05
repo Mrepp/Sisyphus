@@ -75,7 +75,6 @@ def _phases_up_to(total_steps: int) -> list[dict]:
 def _render_phase(
     phase_entry: dict,
     model,
-    obs_hand_dists: bool,
     phase_dir: str,
     args,
     git_short: str,
@@ -97,7 +96,6 @@ def _render_phase(
         upright_coef=params.upright_coef,
         forward_push_coef=params.forward_push_coef,
         max_steps=args.max_steps,
-        obs_hand_dists=obs_hand_dists,
     )
     renderer = PreviewRenderer(env.model, width=args.width, height=args.height)
 
@@ -138,7 +136,6 @@ def _render_phase(
             upright_coef=params.upright_coef,
             forward_push_coef=params.forward_push_coef,
             max_steps=args.max_steps,
-            obs_hand_dists=obs_hand_dists,
         )
         zero_policy = ZeroPolicy(env_bl.action_space.shape)
         renderer_bl = PreviewRenderer(env_bl.model, width=args.width, height=args.height)
@@ -283,13 +280,6 @@ def main():
     model = PPO.load(checkpoint_path)
     print("Model loaded.")
 
-    # Detect whether the checkpoint expects hand-distance observations
-    obs_dim = model.observation_space.shape[0]
-    # Base obs = 60 dims (qpos + qvel + rock_rel + rock_vel + torso_h + com_vel
-    #   + foot contacts + agent_touching + rock_y).
-    # With obs_hand_dists=True: +2 dims → 62 total.
-    obs_hand_dists = obs_dim > 60
-
     # --- Render each phase ---
     manifest_phases = []
     for phase_entry in phases:
@@ -298,7 +288,7 @@ def main():
         os.makedirs(phase_dir, exist_ok=True)
 
         _render_phase(
-            phase_entry, model, obs_hand_dists, phase_dir, args,
+            phase_entry, model, phase_dir, args,
             git_short, total_steps,
         )
 

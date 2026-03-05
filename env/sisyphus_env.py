@@ -95,7 +95,15 @@ class SisyphusEnv(gym.Env):
         self._root_qvel_adr = self.model.jnt_dofadr[self._root_jnt_id]
 
         # Number of actuators
-        self._nu = self.model.nu  # 17
+        self._nu = self.model.nu  # 19 (17 body + 2 ankles)
+
+        # Cache joint IDs for symmetry penalty
+        self._left_hip_y_jnt_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_JOINT, "left_hip_y")
+        self._right_hip_y_jnt_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_JOINT, "right_hip_y")
+        self._left_hip_y_qpos_adr = self.model.jnt_qposadr[self._left_hip_y_jnt_id]
+        self._right_hip_y_qpos_adr = self.model.jnt_qposadr[self._right_hip_y_jnt_id]
 
         # Set rock mass
         self._set_rock_mass(rock_mass)
@@ -123,6 +131,7 @@ class SisyphusEnv(gym.Env):
         # Action / locomotion smoothness tracking
         self._prev_action = np.zeros(self._nu, dtype=np.float32)
         self._prev_com_z = 1.25
+        self._prev_torso_z = 1.25
 
         # Push attribution tracking
         self._last_rock_contact_step = -10
@@ -359,14 +368,14 @@ class SisyphusEnv(gym.Env):
 
         # --- Proprioceptive additions ---
 
-        # Actuator force feedback (17 floats) — joint load sensing
+        # Actuator force feedback (19 floats) — joint load sensing
         parts.append(self.data.actuator_force.copy())
 
-        # Previous action (17 floats) — temporal motor pattern awareness
+        # Previous action (19 floats) — temporal motor pattern awareness
         parts.append(self._prev_action.copy())
 
-        # Phase clock (2 floats) — rhythmic locomotion metronome
-        phase = 2.0 * np.pi * self._step_count / max(self.max_steps, 1)
+        # Phase clock (2 floats) — rhythmic locomotion metronome (120-step period ≈ 1.8s gait cycle)
+        phase = 2.0 * np.pi * self._step_count / 120.0
         parts.append(np.array([np.sin(phase), np.cos(phase)], dtype=np.float32))
 
         # Foot ground reaction forces (2 floats) — weight distribution
@@ -378,6 +387,11 @@ class SisyphusEnv(gym.Env):
 
         # Terrain slope (1 float) — slope-conditioned policy
         parts.append(np.array([self._slope_deg / 15.0], dtype=np.float32))
+
+        # Torso gravity vector in body frame (3 floats) — tilt awareness
+        torso_xmat = self.data.xmat[self._torso_id].reshape(3, 3)
+        gravity_body = torso_xmat[2, :]  # world z-axis in body frame
+        parts.append(gravity_body.astype(np.float32))
 
         obs = np.concatenate(parts).astype(np.float32)
         return obs
@@ -447,7 +461,9 @@ class SisyphusEnv(gym.Env):
         # --- Posture ---
         torso_xmat = self.data.xmat[self._torso_id].reshape(3, 3)
         torso_up_dot = torso_xmat[2, 2]
-        upright_gate = max(0.0, torso_up_dot) ** 2
+        # Soft upright gate: provides some reward even when tilted
+        # up_dot=1.0→1.0, up_dot=0.5→0.55, up_dot=0.0→0.1, up_dot<0→0.1
+        upright_gate = 0.1 + 0.9 * max(0.0, torso_up_dot)
 
         # --- Rewards ---
 
@@ -481,17 +497,29 @@ class SisyphusEnv(gym.Env):
         action_delta = action - self._prev_action
         smoothness_penalty = 0.005 * np.sum(action_delta ** 2)
 
-        # Soft posture penalty
-        _LOW_THRESHOLD = 0.8
-        _FLOOR = 0.3
-        if torso_z < _LOW_THRESHOLD:
-            drop = np.clip(
-                (_LOW_THRESHOLD - torso_z) / (_LOW_THRESHOLD - _FLOOR),
-                0.0, 1.0,
-            )
-            fall_penalty = 10.0 * drop
+        # Unified height reward (replaces alive_bonus + fall_penalty + smooth_height)
+        _HEIGHT_TARGET = 1.25   # standing height
+        _HEIGHT_ZERO = 0.6     # reward crosses zero here
+        _HEIGHT_FLOOR = 0.2    # penalty saturates here
+        if torso_z >= _HEIGHT_TARGET:
+            height_reward_posture = 2.0
+        elif torso_z >= _HEIGHT_ZERO:
+            frac = (torso_z - _HEIGHT_ZERO) / (_HEIGHT_TARGET - _HEIGHT_ZERO)
+            height_reward_posture = 2.0 * frac
+        elif torso_z >= _HEIGHT_FLOOR:
+            frac = (_HEIGHT_ZERO - torso_z) / (_HEIGHT_ZERO - _HEIGHT_FLOOR)
+            height_reward_posture = -4.0 * frac
         else:
-            fall_penalty = 0.0
+            height_reward_posture = -4.0
+        height_reward_posture *= max(self._upright_coef, 0.5)
+
+        # Getting-up reward: reward for increasing torso height when below target
+        torso_z_delta = torso_z - self._prev_torso_z
+        if torso_z < 1.0:
+            getup_reward = 3.0 * max(torso_z_delta, 0.0)
+        else:
+            getup_reward = 0.0
+        self._prev_torso_z = torso_z
 
         # Approach reward (disabled in walk-only mode)
         rock_dist = np.linalg.norm(rock_pos[:2] - torso_pos[:2])
@@ -501,16 +529,8 @@ class SisyphusEnv(gym.Env):
             approach_reward = 5.0 * (self._prev_rock_dist - rock_dist)
         self._prev_rock_dist = rock_dist
 
-        # Posture scaffolding (curriculum-decayed)
+        # Small alive bonus (curriculum-decayed)
         alive_bonus = self._alive_bonus
-        upright_bonus = self._upright_coef * torso_up_dot
-
-        # Smooth height bonus
-        height_target = 1.25
-        smooth_height_bonus = (
-            self._upright_coef * 0.5
-            * min(torso_z / height_target, 1.0)
-        )
 
         # --- Walking rewards ---
 
@@ -560,6 +580,22 @@ class SisyphusEnv(gym.Env):
                 0.5 * interval_bonus + 0.5 * regularity_bonus
             )
 
+        # Continuous per-step cadence reward (supplements event-based)
+        # Phase from the gait clock: sin(phase) > 0 → expect right foot down
+        phase_for_cadence = 2.0 * np.pi * self._step_count / 120.0
+        expected_right = float(np.sin(phase_for_cadence) > 0)
+        expected_left = 1.0 - expected_right
+        phase_match = (
+            expected_right * float(right_foot_on)
+            + expected_left * float(left_foot_on)
+        )
+        cadence_continuous = 0.3 * phase_match * upright_gate
+
+        # Bilateral symmetry penalty: penalize asymmetric hip angles
+        left_hip_y_pos = self.data.qpos[self._left_hip_y_qpos_adr]
+        right_hip_y_pos = self.data.qpos[self._right_hip_y_qpos_adr]
+        symmetry_penalty = 0.05 * abs(left_hip_y_pos - right_hip_y_pos)
+
         # Stance reward
         any_foot_on = float(right_foot_on or left_foot_on)
         stance_reward = 0.5 * any_foot_on * upright_gate
@@ -606,12 +642,13 @@ class SisyphusEnv(gym.Env):
         reward = (
             height_reward + forward_reward + approach_reward
             - cot_penalty - smoothness_penalty
-            - fall_penalty + idle_penalty
-            + alive_bonus + upright_bonus + smooth_height_bonus
-            + walk_reward + cadence_reward
+            + idle_penalty
+            + height_reward_posture + alive_bonus + getup_reward
+            + walk_reward + cadence_reward + cadence_continuous
             + stance_reward + contact_reward
             + com_stability_reward + lean_reward
             - lateral_penalty - rock_rollback_penalty
+            - symmetry_penalty
         )
 
         # Infinite illusion: teleport when approaching terrain end
@@ -655,7 +692,8 @@ class SisyphusEnv(gym.Env):
             "torso_height": torso_z,
             "torso_up_dot": torso_up_dot,
             "alive_bonus": alive_bonus,
-            "upright_bonus": upright_bonus,
+            "height_reward_posture": height_reward_posture,
+            "getup_reward": getup_reward,
             "forward_reward": forward_reward,
             "height_reward": height_reward,
             "contact_reward": contact_reward,
@@ -669,7 +707,6 @@ class SisyphusEnv(gym.Env):
             "walk_reward": walk_reward,
             "approach_reward": approach_reward,
             "idle_penalty": idle_penalty,
-            "smooth_height_bonus": smooth_height_bonus,
             "cadence_reward": cadence_reward,
             "stance_reward": stance_reward,
             "lateral_penalty": lateral_penalty,
@@ -687,6 +724,8 @@ class SisyphusEnv(gym.Env):
             "smoothness_penalty": smoothness_penalty,
             "com_stability_reward": com_stability_reward,
             "lean_reward": lean_reward,
+            "cadence_continuous": cadence_continuous,
+            "symmetry_penalty": symmetry_penalty,
         }
 
         # Add promotion_score on terminal step — requires active pushing
@@ -713,12 +752,15 @@ class SisyphusEnv(gym.Env):
         super().reset(seed=seed)
         mujoco.mj_resetData(self.model, self.data)
 
-        # Humanoid standing pose (default qpos from model)
-        self.data.qpos[:] = self.model.key_qpos[0] if self.model.nkey > 0 else 0.0
-
-        # If no keyframe, set basic standing position
-        if self.model.nkey == 0:
-            self.data.qpos[self._root_qpos_adr + 2] = 1.4  # z height
+        # Explicit standing pose — never rely on key_qpos being correct
+        self.data.qpos[:] = 0.0
+        self.data.qpos[self._root_qpos_adr + 2] = 1.4      # z height
+        self.data.qpos[self._root_qpos_adr + 3] = 1.0      # quat w (identity)
+        # Small random joint perturbation for exploration diversity
+        n_joints = self._rock_qpos_adr - (self._root_qpos_adr + 7)
+        self.data.qpos[self._root_qpos_adr + 7: self._rock_qpos_adr] += (
+            self.np_random.normal(0, 0.005, size=n_joints)
+        )
 
         # Offset humanoid z by terrain height at its x position
         root_x = self.data.qpos[self._root_qpos_adr]
@@ -751,10 +793,12 @@ class SisyphusEnv(gym.Env):
 
         mujoco.mj_forward(self.model, self.data)
 
-        # Settle rock onto terrain surface, then kill residual velocity
+        # Settle rock onto terrain surface, then kill ALL residual velocity
         for _ in range(10):
             mujoco.mj_step(self.model, self.data)
         self.data.qvel[self._rock_qvel_adr: self._rock_qvel_adr + 6] = 0.0
+        # Zero humanoid velocity too — settling steps cause it to start mid-fall
+        self.data.qvel[self._root_qvel_adr: self._rock_qvel_adr] = 0.0
         mujoco.mj_forward(self.model, self.data)
 
         self._step_count = 0
@@ -774,6 +818,7 @@ class SisyphusEnv(gym.Env):
         # Reset action / locomotion smoothness tracking
         self._prev_action[:] = 0.0
         self._prev_com_z = self.data.subtree_com[0][2]
+        self._prev_torso_z = self.data.xpos[self._torso_id][2]
 
         # Reset push attribution tracking
         self._last_rock_contact_step = -10

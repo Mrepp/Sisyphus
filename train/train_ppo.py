@@ -162,13 +162,16 @@ def create_model(
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,
-        clip_range=0.2,
+        clip_range=0.15,
         target_kl=0.03,
         ent_coef=0.01,
         verbose=1,
         device=hw.get("device", "auto"),
         tensorboard_log=tensorboard_log,
-        policy_kwargs=dict(net_arch=[dict(pi=net_arch, vf=net_arch)]),
+        policy_kwargs=dict(
+            net_arch=[dict(pi=net_arch, vf=net_arch)],
+            log_std_init=-1.0,  # Initial std ≈ 0.37 (reduces flailing)
+        ),
     )
     defaults.update(kwargs)
     return PPO("MlpPolicy", vec_env, **defaults)
@@ -220,16 +223,37 @@ def train(
         ),
     ]
 
+    if eval_env is None:
+        eval_env = SisyphusEnv(
+            slope_deg=0.0, rock_mass=20.0, max_steps=1000,
+        )
+
+    # Wrap eval env for normalized observations (must match training)
+    from stable_baselines3.common.vec_env import (
+        DummyVecEnv, VecNormalize as VecNorm,
+    )
+    eval_vec_env = VecNorm(
+        DummyVecEnv([lambda: eval_env]),
+        norm_obs=True,
+        norm_reward=False,
+        training=False,
+    )
+
     if use_curriculum:
         curriculum = curriculum or CurriculumManager()
-        callbacks.append(CurriculumCallback(curriculum, verbose=1))
-
-    if eval_env is None:
-        eval_env = SisyphusEnv(slope_deg=0.0, rock_mass=20.0, max_steps=1000)
+        callbacks.append(
+            CurriculumCallback(
+                curriculum,
+                eval_env=eval_env,
+                verbose=1,
+            )
+        )
 
     callbacks.append(
         TrajectoryRenderCallback(
             eval_env=eval_env,
+            eval_vec_env=eval_vec_env,
+            training_env=model.env,
             save_freq=save_freq,
             replay_dir=replay_dir,
             render_dir=render_dir,

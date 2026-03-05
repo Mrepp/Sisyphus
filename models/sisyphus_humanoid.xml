@@ -3,7 +3,7 @@
   <option integrator="RK4" iterations="50" solver="Newton" timestep="0.003">
     <flag warmstart="enable"/>
   </option>
-  <size nkey="5" nuser_geom="1"/>
+  <size nkey="1" nuser_geom="1"/>
 
   <default>
     <joint armature="1" damping="1" limited="true"/>
@@ -69,15 +69,19 @@
                    range="-25 5" stiffness="10" type="hinge"/>
             <joint armature="0.01" axis="0 0 1" damping="5" name="right_hip_z" pos="0 0 0"
                    range="-60 35" stiffness="10" type="hinge"/>
-            <joint armature="0.0080" axis="0 1 0" damping="5" name="right_hip_y" pos="0 0 0"
+            <joint armature="0.01" axis="0 1 0" damping="5" name="right_hip_y" pos="0 0 0"
                    range="-110 20" stiffness="20" type="hinge"/>
             <geom fromto="0 0 0 0 0.01 -.34" name="right_thigh1" size="0.06" type="capsule"/>
             <body name="right_shin" pos="0 0.01 -0.403">
               <joint armature="0.0060" axis="0 -1 0" name="right_knee" pos="0 0 .02"
-                     range="-160 -2" type="hinge"/>
+                     range="-160 -2" stiffness="1" type="hinge"/>
               <geom fromto="0 0 0 0 0 -.3" name="right_shin1" size="0.049" type="capsule"/>
               <body name="right_foot" pos="0 0 -0.45">
-                <geom name="right_foot" pos="0 0 0.1" size="0.075" type="sphere" user="0"/>
+                <joint armature="0.006" axis="0 1 0" damping="3" name="right_ankle_y"
+                       pos="0 0 0.1" range="-45 25" stiffness="8" type="hinge"/>
+                <geom name="right_foot" fromto="-0.07 0 0.02 0.14 0 0.02"
+                      size="0.04" type="capsule" user="0"
+                      friction="1.5 0.005 0.02"/>
               </body>
             </body>
           </body>
@@ -96,7 +100,11 @@
                      range="-160 -2" stiffness="1" type="hinge"/>
               <geom fromto="0 0 0 0 0 -.3" name="left_shin1" size="0.049" type="capsule"/>
               <body name="left_foot" pos="0 0 -0.45">
-                <geom name="left_foot" type="sphere" size="0.075" pos="0 0 0.1" user="0"/>
+                <joint armature="0.006" axis="0 1 0" damping="3" name="left_ankle_y"
+                       pos="0 0 0.1" range="-45 25" stiffness="8" type="hinge"/>
+                <geom name="left_foot" fromto="-0.07 0 0.02 0.14 0 0.02"
+                      size="0.04" type="capsule" user="0"
+                      friction="1.5 0.005 0.02"/>
               </body>
             </body>
           </body>
@@ -154,6 +162,13 @@
     </fixed>
   </tendon>
 
+  <equality>
+    <!-- Bi-articular hip-knee coupling: models rectus femoris / hamstrings.
+         Soft constraint (solref="0.04 1") acts as muscle tone, not rigid linkage. -->
+    <tendon tendon1="left_hipknee" polycoef="0 1 0 0 0" solref="0.04 1"/>
+    <tendon tendon1="right_hipknee" polycoef="0 1 0 0 0" solref="0.04 1"/>
+  </equality>
+
   <actuator>
     <motor gear="100" joint="abdomen_y" name="abdomen_y"/>
     <motor gear="100" joint="abdomen_z" name="abdomen_z"/>
@@ -162,15 +177,22 @@
     <motor gear="100" joint="right_hip_z" name="right_hip_z"/>
     <motor gear="300" joint="right_hip_y" name="right_hip_y"/>
     <motor gear="200" joint="right_knee" name="right_knee"/>
+    <motor gear="100" joint="right_ankle_y" name="right_ankle_y"/>
     <motor gear="100" joint="left_hip_x" name="left_hip_x"/>
     <motor gear="100" joint="left_hip_z" name="left_hip_z"/>
     <motor gear="300" joint="left_hip_y" name="left_hip_y"/>
     <motor gear="200" joint="left_knee" name="left_knee"/>
-    <motor gear="75" joint="right_shoulder1" name="right_shoulder1"/>
-    <motor gear="75" joint="right_shoulder2" name="right_shoulder2"/>
-    <motor gear="75" joint="right_elbow" name="right_elbow"/>
-    <motor gear="75" joint="left_shoulder1" name="left_shoulder1"/>
-    <motor gear="75" joint="left_shoulder2" name="left_shoulder2"/>
-    <motor gear="75" joint="left_elbow" name="left_elbow"/>
+    <motor gear="100" joint="left_ankle_y" name="left_ankle_y"/>
+    <motor gear="125" joint="right_shoulder1" name="right_shoulder1"/>
+    <motor gear="125" joint="right_shoulder2" name="right_shoulder2"/>
+    <motor gear="100" joint="right_elbow" name="right_elbow"/>
+    <motor gear="125" joint="left_shoulder1" name="left_shoulder1"/>
+    <motor gear="125" joint="left_shoulder2" name="left_shoulder2"/>
+    <motor gear="100" joint="left_elbow" name="left_elbow"/>
   </actuator>
+
+  <keyframe>
+    <!-- Standing pose: root at z=1.4, identity quat, all joints zero, rock at (1.5, 0, 0.7) -->
+    <key name="stand" qpos="0 0 1.4  1 0 0 0  0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0 0 0  1.5 0 0.7 1 0 0 0"/>
+  </keyframe>
 </mujoco>
