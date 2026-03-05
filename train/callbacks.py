@@ -73,6 +73,9 @@ class CurriculumCallback(BaseCallback):
                 score = terminal_info.get("promotion_score")
                 if score is not None:
                     self.curriculum.add_promotion_score(score)
+                contact_frac = terminal_info.get("contact_fraction")
+                if contact_frac is not None:
+                    self.logger.record("metrics/contact_fraction", contact_frac)
 
         # --- Check for phase transition ---
         changed, params = self.curriculum.check_transition(total_steps)
@@ -141,14 +144,31 @@ class CurriculumCallback(BaseCallback):
                     "metrics/hand_contact_rate",
                     np.mean([i.get("hand_contact", 0)
                              for i in infos]))
-                # New metrics
+                # Locomotion metrics
                 self.logger.record(
-                    "metrics/gait_reward_mean",
-                    np.mean([i.get("gait_reward", 0)
+                    "metrics/cadence_reward_mean",
+                    np.mean([i.get("cadence_reward", 0)
                              for i in infos]))
                 self.logger.record(
                     "metrics/stance_reward_mean",
                     np.mean([i.get("stance_reward", 0)
+                             for i in infos]))
+                self.logger.record(
+                    "metrics/com_stability_mean",
+                    np.mean([i.get("com_stability_reward", 0)
+                             for i in infos]))
+                self.logger.record(
+                    "metrics/lean_reward_mean",
+                    np.mean([i.get("lean_reward", 0)
+                             for i in infos]))
+                # Penalty metrics
+                self.logger.record(
+                    "metrics/cot_penalty_mean",
+                    np.mean([i.get("cot_penalty", 0)
+                             for i in infos]))
+                self.logger.record(
+                    "metrics/smoothness_penalty_mean",
+                    np.mean([i.get("smoothness_penalty", 0)
                              for i in infos]))
                 self.logger.record(
                     "metrics/lateral_penalty_mean",
@@ -158,14 +178,20 @@ class CurriculumCallback(BaseCallback):
                     "metrics/rock_rollback_penalty_mean",
                     np.mean([i.get("rock_rollback_penalty", 0)
                              for i in infos]))
+                # Push metrics
                 self.logger.record(
-                    "metrics/push_gate_mean",
-                    np.mean([i.get("push_gate", 0)
+                    "metrics/force_gate_mean",
+                    np.mean([i.get("force_gate", 0)
+                             for i in infos]))
+                self.logger.record(
+                    "metrics/rock_contact_force_mean",
+                    np.mean([i.get("rock_contact_force", 0)
                              for i in infos]))
                 self.logger.record(
                     "metrics/gait_step_count_mean",
                     np.mean([i.get("gait_step_count", 0)
                              for i in infos]))
+                # Contact metrics
                 self.logger.record(
                     "metrics/right_foot_on_rate",
                     np.mean([i.get("right_foot_on", 0)
@@ -177,6 +203,14 @@ class CurriculumCallback(BaseCallback):
                 self.logger.record(
                     "metrics/rock_y_mean",
                     np.mean([i.get("rock_y", 0)
+                             for i in infos]))
+                self.logger.record(
+                    "metrics/agent_touching_rock_rate",
+                    np.mean([i.get("agent_touching_rock", 0)
+                             for i in infos]))
+                self.logger.record(
+                    "metrics/torso_height_mean",
+                    np.mean([i.get("torso_height", 0)
                              for i in infos]))
 
                 # Rolling promotion score

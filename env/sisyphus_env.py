@@ -5,6 +5,8 @@ learning (variable slope/mass) and an infinite-illusion mode for Phase IV.
 """
 
 import os
+from collections import deque
+
 import numpy as np
 import mujoco
 import gymnasium as gym
@@ -104,34 +106,43 @@ class SisyphusEnv(gym.Env):
         # Forward to compute derived quantities
         mujoco.mj_forward(self.model, self.data)
 
-        # --- Spaces ---
-        # Observation: humanoid qpos (skip root x), humanoid qvel, rock rel pos/vel, torso height, com vel
-        obs_size = self._get_obs().shape[0]
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
-        )
-        self.action_space = spaces.Box(
-            low=-1.0, high=1.0, shape=(self._nu,), dtype=np.float32
-        )
-
-        # State tracking
+        # State tracking (must be before _get_obs() call)
         self._step_count = 0
         self._prev_rock_height = 0.0
         self._prev_rock_x = 0.0
         self._prev_rock_dist = 0.0
         self._total_height_accumulated = 0.0
-        self._reset_x = 1.0  # x position to teleport back to
+        self._reset_x = 1.0
 
         # Gait tracking
-        self._last_sole_foot = None  # "right" or "left" — last foot exclusively on ground
+        self._last_sole_foot = None
         self._gait_step_count = 0
+        self._last_foot_switch_step = 0
+        self._step_intervals = deque(maxlen=10)
+
+        # Action / locomotion smoothness tracking
+        self._prev_action = np.zeros(self._nu, dtype=np.float32)
+        self._prev_com_z = 1.25
 
         # Push attribution tracking
-        self._last_rock_contact_step = -10  # step when agent last touched rock
+        self._last_rock_contact_step = -10
 
         # Episode tracking for promotion score
         self._episode_rock_x_start = 0.0
         self._episode_rollback_distance = 0.0
+        self._episode_rock_contact_steps = 0
+        self._episode_pushed_forward = 0.0
+
+        # --- Spaces ---
+        obs_size = self._get_obs().shape[0]
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf,
+            shape=(obs_size,), dtype=np.float32,
+        )
+        self.action_space = spaces.Box(
+            low=-1.0, high=1.0,
+            shape=(self._nu,), dtype=np.float32,
+        )
 
         # Renderer (lazy init)
         self._renderer = None
@@ -250,6 +261,46 @@ class SisyphusEnv(gym.Env):
         return False
 
     # ------------------------------------------------------------------
+    # Ground reaction forces
+    # ------------------------------------------------------------------
+    def _foot_ground_forces(self) -> tuple[float, float]:
+        """Normal force magnitude on each foot from terrain contacts."""
+        right_force = 0.0
+        left_force = 0.0
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = c.geom1, c.geom2
+            if g1 == self._terrain_geom_id or g2 == self._terrain_geom_id:
+                other = g2 if g1 == self._terrain_geom_id else g1
+                if other == self._right_foot_geom_id or other == self._left_foot_geom_id:
+                    force = np.zeros(6)
+                    mujoco.mj_contactForce(self.model, self.data, i, force)
+                    normal_mag = abs(force[0])
+                    if other == self._right_foot_geom_id:
+                        right_force += normal_mag
+                    else:
+                        left_force += normal_mag
+        return right_force, left_force
+
+    # ------------------------------------------------------------------
+    # Agent-rock contact force
+    # ------------------------------------------------------------------
+    def _agent_rock_contact_force(self) -> float:
+        """Total normal force magnitude from agent-rock contacts."""
+        total_force = 0.0
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = c.geom1, c.geom2
+            is_rock = (g1 == self._rock_geom_id or g2 == self._rock_geom_id)
+            if is_rock:
+                other = g2 if g1 == self._rock_geom_id else g1
+                if other in self._humanoid_geom_ids:
+                    force = np.zeros(6)
+                    mujoco.mj_contactForce(self.model, self.data, i, force)
+                    total_force += abs(force[0])
+        return total_force
+
+    # ------------------------------------------------------------------
     # Observation
     # ------------------------------------------------------------------
     def _get_obs(self) -> np.ndarray:
@@ -290,12 +341,12 @@ class SisyphusEnv(gym.Env):
             com_vel,
         ]
 
-        # Hand-to-rock surface distances (added post-initial training)
+        # Hand-to-rock surface distances
         if self._obs_hand_dists:
             r_hand_d, l_hand_d = self._hand_rock_distances()
             parts.append(np.array([r_hand_d, l_hand_d]))
 
-        # New observations: foot contacts, agent touching rock, rock Y position
+        # Foot contacts, agent touching rock, rock Y position
         right_foot_on, left_foot_on = self._foot_terrain_contacts()
         agent_touching = self._agent_touching_rock()
         rock_y = self.data.xpos[self._rock_id][1]
@@ -305,6 +356,28 @@ class SisyphusEnv(gym.Env):
             float(agent_touching),
             rock_y,
         ]))
+
+        # --- Proprioceptive additions ---
+
+        # Actuator force feedback (17 floats) — joint load sensing
+        parts.append(self.data.actuator_force.copy())
+
+        # Previous action (17 floats) — temporal motor pattern awareness
+        parts.append(self._prev_action.copy())
+
+        # Phase clock (2 floats) — rhythmic locomotion metronome
+        phase = 2.0 * np.pi * self._step_count / max(self.max_steps, 1)
+        parts.append(np.array([np.sin(phase), np.cos(phase)], dtype=np.float32))
+
+        # Foot ground reaction forces (2 floats) — weight distribution
+        right_grf, left_grf = self._foot_ground_forces()
+        parts.append(np.array([right_grf, left_grf], dtype=np.float32))
+
+        # Rock contact force magnitude (1 float) — push intensity
+        parts.append(np.array([self._agent_rock_contact_force()], dtype=np.float32))
+
+        # Terrain slope (1 float) — slope-conditioned policy
+        parts.append(np.array([self._slope_deg / 15.0], dtype=np.float32))
 
         obs = np.concatenate(parts).astype(np.float32)
         return obs
@@ -351,41 +424,76 @@ class SisyphusEnv(gym.Env):
         # Update rock contact tracking for push attribution
         if agent_touching_rock:
             self._last_rock_contact_step = self._step_count
+            self._episode_rock_contact_steps += 1
 
-        # Push gate: 5-step eligibility window after contact
-        push_gate = 1.0 if (self._step_count - self._last_rock_contact_step) < 5 else 0.0
+        # --- Force-based push gating (replaces binary 5-step window) ---
+        rock_contact_force = self._agent_rock_contact_force()
+        force_gate = np.clip(rock_contact_force / 200.0, 0.0, 1.0)
+        # Fallback for early training when forces are small
+        binary_gate = float(
+            (self._step_count - self._last_rock_contact_step) < 5
+        )
+        force_gate = max(force_gate, 0.3 * binary_gate)
 
         # In walk-only mode, disable push rewards entirely
         if self._walk_only_mode:
-            push_gate = 0.0
+            force_gate = 0.0
+
+        # Accumulate agent-pushed forward displacement
+        if force_gate > 0 and delta_x_rock > 0:
+            if torso_pos[0] <= rock_x:
+                self._episode_pushed_forward += delta_x_rock
 
         # --- Posture ---
         torso_xmat = self.data.xmat[self._torso_id].reshape(3, 3)
-        torso_up_dot = torso_xmat[2, 2]  # z-component of torso z-axis vs world up
+        torso_up_dot = torso_xmat[2, 2]
         upright_gate = max(0.0, torso_up_dot) ** 2
 
         # --- Rewards ---
 
-        # Forward-push reward: only when agent touches rock AND rock moves +X
-        forward_reward = 10.0 * max(delta_x_rock, 0) * push_gate
+        # Forward-push reward (force-gated)
+        forward_reward = 10.0 * max(delta_x_rock, 0) * force_gate
 
-        # Height reward: only when agent touches rock AND rock gains height
-        height_reward = 50.0 * max(delta_h_rock, 0) * push_gate
+        # Height reward (force-gated)
+        height_reward = 50.0 * max(delta_h_rock, 0) * force_gate
 
-        # Rock rollback penalty: incentivize bracing on slopes
-        rock_rollback_penalty = 5.0 * max(-delta_x_rock, 0) if self._slope_deg > 0 else 0.0
+        # Rock rollback penalty
+        rock_rollback_penalty = (
+            5.0 * max(-delta_x_rock, 0)
+            if self._slope_deg > 0 else 0.0
+        )
 
         # Lateral drift penalty
         lateral_penalty = 2.0 * abs(rock_y)
 
-        # Torque penalty
-        torque_penalty = 0.0001 * np.sum(action ** 2)
+        # Cost of transport (replaces torque penalty)
+        qvel = self.data.qvel
+        joint_vel = qvel[self._root_qvel_adr + 6:
+                         self._rock_qvel_adr]
+        mechanical_power = np.sum(
+            np.abs(self.data.actuator_force * joint_vel)
+        )
+        com_vel_x = self.data.subtree_linvel[0][0]
+        speed = max(abs(com_vel_x), 0.1)
+        cot_penalty = 0.002 * mechanical_power / speed
 
-        # Fall penalty
-        fell = torso_z < 0.7
-        fall_penalty = 500.0 if fell else 0.0
+        # Action smoothness penalty
+        action_delta = action - self._prev_action
+        smoothness_penalty = 0.005 * np.sum(action_delta ** 2)
 
-        # Approach reward: closing distance to rock (disabled in walk-only mode)
+        # Soft posture penalty
+        _LOW_THRESHOLD = 0.8
+        _FLOOR = 0.3
+        if torso_z < _LOW_THRESHOLD:
+            drop = np.clip(
+                (_LOW_THRESHOLD - torso_z) / (_LOW_THRESHOLD - _FLOOR),
+                0.0, 1.0,
+            )
+            fall_penalty = 10.0 * drop
+        else:
+            fall_penalty = 0.0
+
+        # Approach reward (disabled in walk-only mode)
         rock_dist = np.linalg.norm(rock_pos[:2] - torso_pos[:2])
         if self._walk_only_mode:
             approach_reward = 0.0
@@ -393,22 +501,26 @@ class SisyphusEnv(gym.Env):
             approach_reward = 5.0 * (self._prev_rock_dist - rock_dist)
         self._prev_rock_dist = rock_dist
 
-        # Posture scaffolding (decayed via curriculum — zero by Phase III)
+        # Posture scaffolding (curriculum-decayed)
         alive_bonus = self._alive_bonus
         upright_bonus = self._upright_coef * torso_up_dot
 
-        # Smooth height bonus: continuous gradient for "stay tall"
+        # Smooth height bonus
         height_target = 1.25
-        smooth_height_bonus = self._upright_coef * 0.5 * min(torso_z / height_target, 1.0)
+        smooth_height_bonus = (
+            self._upright_coef * 0.5
+            * min(torso_z / height_target, 1.0)
+        )
 
-        # --- Walking rewards (fixed coefficients, no curriculum decay) ---
+        # --- Walking rewards ---
 
-        # COM forward velocity reward (gated on uprightness, fixed coefficient)
-        com_vel_x = self.data.subtree_linvel[0][0]
-        walk_reward = 1.5 * min(max(com_vel_x, 0.0), 1.5) * upright_gate
+        # COM forward velocity reward
+        walk_reward = (
+            1.5 * min(max(com_vel_x, 0.0), 1.5) * upright_gate
+        )
 
-        # Gait reward: alternating foot steps scaled by forward velocity
-        gait_reward = 0.0
+        # Cadence reward (replaces simple gait reward)
+        cadence_reward = 0.0
         if right_foot_on and not left_foot_on:
             current_sole = "right"
         elif left_foot_on and not right_foot_on:
@@ -416,30 +528,91 @@ class SisyphusEnv(gym.Env):
         else:
             current_sole = None
 
-        if current_sole is not None and current_sole != self._last_sole_foot:
-            # Foot switch detected — scale by forward velocity
-            vel_scale = np.clip(com_vel_x / 0.6, 0.0, 1.0)
-            gait_reward = 2.0 * vel_scale
-            self._gait_step_count += 1
+        if (current_sole is not None
+                and current_sole != self._last_sole_foot):
+            interval = (
+                self._step_count - self._last_foot_switch_step
+            )
+            self._step_intervals.append(interval)
+            self._last_foot_switch_step = self._step_count
             self._last_sole_foot = current_sole
+            self._gait_step_count += 1
 
-        # Stance reward: any foot on ground while upright
+            # Target ~60 steps (~0.9s at 67Hz) between switches
+            TARGET_INTERVAL = 60
+            INTERVAL_TOLERANCE = 20
+            interval_error = abs(interval - TARGET_INTERVAL)
+            interval_bonus = max(
+                0.0, 1.0 - interval_error / INTERVAL_TOLERANCE
+            )
+
+            # Regularity: consistent stride intervals
+            regularity_bonus = 0.0
+            if len(self._step_intervals) >= 4:
+                intervals = np.array(self._step_intervals)
+                cv = np.std(intervals) / (
+                    np.mean(intervals) + 1e-8
+                )
+                regularity_bonus = max(0.0, 1.0 - cv)
+
+            vel_scale = np.clip(com_vel_x / 0.6, 0.0, 1.0)
+            cadence_reward = 2.0 * vel_scale * (
+                0.5 * interval_bonus + 0.5 * regularity_bonus
+            )
+
+        # Stance reward
         any_foot_on = float(right_foot_on or left_foot_on)
         stance_reward = 0.5 * any_foot_on * upright_gate
 
-        # Idle penalty: discourage standing still (delayed onset after step 50)
-        idle_penalty = -0.1 if (com_vel_x < 0.05 and self._step_count > 50) else 0.0
+        # COM height stability reward
+        com_z = self.data.subtree_com[0][2]
+        com_z_change = abs(com_z - self._prev_com_z)
+        com_stability_reward = 0.3 * max(
+            0.0, 1.0 - com_z_change / 0.05
+        )
+        self._prev_com_z = com_z
 
-        # Contact reward: binary hand-on-rock, gated on uprightness
+        # Idle penalty
+        idle_penalty = (
+            -0.1 if (com_vel_x < 0.05 and self._step_count > 50)
+            else 0.0
+        )
+
+        # Contact reward: hand-on-rock, gated on uprightness
         right_dist, left_dist = self._hand_rock_distances()
-        hand_contact = 1.0 if (right_dist < 0.05 or left_dist < 0.05) else 0.0
+        hand_contact = (
+            1.0 if (right_dist < 0.05 or left_dist < 0.05)
+            else 0.0
+        )
         contact_reward = hand_contact * upright_gate
 
-        reward = (height_reward + forward_reward + approach_reward
-                  - torque_penalty - fall_penalty + idle_penalty
-                  + alive_bonus + upright_bonus + smooth_height_bonus
-                  + walk_reward + gait_reward + stance_reward + contact_reward
-                  - lateral_penalty - rock_rollback_penalty)
+        # Body lean reward: torso oriented toward rock during push
+        lean_reward = 0.0
+        if rock_dist < 1.5 and rock_contact_force > 10.0:
+            torso_fwd = torso_xmat[:, 0]
+            rock_dir = rock_pos[:2] - torso_pos[:2]
+            rock_dir_n = rock_dir / (
+                np.linalg.norm(rock_dir) + 1e-8
+            )
+            lean_dot = (
+                torso_fwd[0] * rock_dir_n[0]
+                + torso_fwd[1] * rock_dir_n[1]
+            )
+            lean_reward = 1.5 * max(lean_dot, 0.0)
+
+        # Update previous action for next step
+        self._prev_action = action.copy()
+
+        reward = (
+            height_reward + forward_reward + approach_reward
+            - cot_penalty - smoothness_penalty
+            - fall_penalty + idle_penalty
+            + alive_bonus + upright_bonus + smooth_height_bonus
+            + walk_reward + cadence_reward
+            + stance_reward + contact_reward
+            + com_stability_reward + lean_reward
+            - lateral_penalty - rock_rollback_penalty
+        )
 
         # Infinite illusion: teleport when approaching terrain end
         if self.infinite_mode and torso_pos[0] > 0.7 * self._terrain_length:
@@ -468,8 +641,9 @@ class SisyphusEnv(gym.Env):
                 self.data.xpos[self._rock_id][:2] - self.data.xpos[self._torso_id][:2]
             )
 
-        # Termination
-        terminated = bool(fell)
+        # No early termination — let the agent learn from the full episode.
+        # The soft posture penalty above provides continuous gradient.
+        terminated = False
         truncated = self._step_count >= self.max_steps
 
         # Compute episode metrics for promotion score
@@ -496,25 +670,38 @@ class SisyphusEnv(gym.Env):
             "approach_reward": approach_reward,
             "idle_penalty": idle_penalty,
             "smooth_height_bonus": smooth_height_bonus,
-            "gait_reward": gait_reward,
+            "cadence_reward": cadence_reward,
             "stance_reward": stance_reward,
             "lateral_penalty": lateral_penalty,
             "rock_rollback_penalty": rock_rollback_penalty,
-            "push_gate": push_gate,
+            "force_gate": force_gate,
+            "rock_contact_force": rock_contact_force,
             "rock_delta_x_total": rock_delta_x_total,
             "gait_step_count": self._gait_step_count,
             "right_foot_on": float(right_foot_on),
             "left_foot_on": float(left_foot_on),
             "agent_touching_rock": float(agent_touching_rock),
             "rock_y": rock_y,
+            "pushed_forward": self._episode_pushed_forward,
+            "cot_penalty": cot_penalty,
+            "smoothness_penalty": smoothness_penalty,
+            "com_stability_reward": com_stability_reward,
+            "lean_reward": lean_reward,
         }
 
-        # Add promotion_score on terminal step
+        # Add promotion_score on terminal step — requires active pushing
         if terminated or truncated:
-            promotion_score = (rock_delta_x_total
-                               - 2.0 * abs(rock_y)
-                               - self._episode_rollback_distance)
+            contact_fraction = (self._episode_rock_contact_steps / max(self._step_count, 1))
+            # Only credit rock displacement from active pushing, require ≥10% contact
+            if contact_fraction >= 0.10:
+                promotion_score = (self._episode_pushed_forward
+                                   - 2.0 * abs(rock_y)
+                                   - self._episode_rollback_distance)
+            else:
+                promotion_score = 0.0  # no credit if agent never actively pushed
             info["promotion_score"] = promotion_score
+            info["contact_fraction"] = contact_fraction
+            info["pushed_forward"] = self._episode_pushed_forward
 
         obs = self._get_obs()
         return obs, reward, terminated, truncated, info
@@ -581,6 +768,12 @@ class SisyphusEnv(gym.Env):
         # Reset gait tracking
         self._last_sole_foot = None
         self._gait_step_count = 0
+        self._last_foot_switch_step = 0
+        self._step_intervals.clear()
+
+        # Reset action / locomotion smoothness tracking
+        self._prev_action[:] = 0.0
+        self._prev_com_z = self.data.subtree_com[0][2]
 
         # Reset push attribution tracking
         self._last_rock_contact_step = -10
@@ -588,6 +781,8 @@ class SisyphusEnv(gym.Env):
         # Reset episode tracking
         self._episode_rock_x_start = self.data.xpos[self._rock_id][0]
         self._episode_rollback_distance = 0.0
+        self._episode_rock_contact_steps = 0
+        self._episode_pushed_forward = 0.0
 
         obs = self._get_obs()
         info = {

@@ -32,8 +32,8 @@ SCHEDULE = [
      "infinite": False, "alive_bonus": 3.0, "upright_coef": 3.0,
      "forward_push_coef": 5.0,
      "promotion_metric": "promotion_score", "promotion_threshold": 6.0,
-     "min_steps": 2_000_000, "max_steps": 20_000_000,
-     "walk_only_steps": 3_000_000},
+     "min_steps": 4_000_000, "max_steps": 25_000_000,
+     "walk_only_steps": 2_000_000},
     # Phase II: Add slope. Reduce scaffolding.
     {"phase": "II",  "slope": 5.0,  "mass": 35.0,
      "infinite": False, "alive_bonus": 1.5, "upright_coef": 1.0,
@@ -132,11 +132,9 @@ class CurriculumManager:
 
         steps_in_phase = total_steps - self._phase_start_step
         min_steps = entry.get("min_steps", 0)
-        max_steps = entry.get("max_steps")
 
-        # Safety cap: promote if we've exceeded max_steps
-        if max_steps is not None and steps_in_phase >= max_steps:
-            return True
+        # No auto-promotion — the agent must earn it via metrics.
+        # (max_steps in the schedule is retained for informational purposes only.)
 
         # Not enough steps yet
         if steps_in_phase < min_steps:
