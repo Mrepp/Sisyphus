@@ -205,7 +205,7 @@ def train(
         render_enabled: Render preview MP4s at each checkpoint. Disable on Colab.
         reset_num_timesteps: Reset step counter (False for chunked training).
     """
-    from stable_baselines3.common.callbacks import CheckpointCallback
+    from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
     from train.callbacks import CurriculumCallback, TrajectoryRenderCallback
 
     os.makedirs(checkpoint_dir, exist_ok=True)
@@ -215,11 +215,35 @@ def train(
     num_envs = model.env.num_envs
     save_freq = max(checkpoint_freq // num_envs, 1)
 
+    # Custom callback to save VecNormalize stats alongside each checkpoint
+    class VecNormalizeSaveCallback(BaseCallback):
+        """Save VecNormalize stats every save_freq steps."""
+        def __init__(self, save_freq, save_path, verbose=0):
+            super().__init__(verbose)
+            self._save_freq = save_freq
+            self._save_path = save_path
+
+        def _on_step(self) -> bool:
+            if self.n_calls % self._save_freq == 0:
+                path = os.path.join(
+                    self._save_path,
+                    f"vec_normalize_{self.num_timesteps}_steps.pkl",
+                )
+                self.training_env.save(path)
+                if self.verbose:
+                    logger.info(f"Saved VecNormalize: {path}")
+            return True
+
     callbacks = [
         CheckpointCallback(
             save_freq=save_freq,
             save_path=checkpoint_dir,
             name_prefix="sisyphus_ppo",
+        ),
+        VecNormalizeSaveCallback(
+            save_freq=save_freq,
+            save_path=checkpoint_dir,
+            verbose=1,
         ),
     ]
 
@@ -238,6 +262,10 @@ def train(
         norm_reward=False,
         training=False,
     )
+    # Sync eval normalization stats from training env immediately
+    # so the first eval trajectory isn't nonsensical
+    from stable_baselines3.common.vec_env import sync_envs_normalization
+    sync_envs_normalization(model.env, eval_vec_env)
 
     if use_curriculum:
         curriculum = curriculum or CurriculumManager()

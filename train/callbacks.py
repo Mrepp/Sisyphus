@@ -158,8 +158,8 @@ class CurriculumCallback(BaseCallback):
                     np.mean([i.get("rock_delta_x", 0)
                              for i in infos]))
                 self.logger.record(
-                    "metrics/hand_contact_rate",
-                    np.mean([i.get("hand_contact", 0)
+                    "metrics/contact_reward_mean",
+                    np.mean([i.get("contact_reward", 0)
                              for i in infos]))
                 # Locomotion metrics
                 self.logger.record(
@@ -197,8 +197,8 @@ class CurriculumCallback(BaseCallback):
                              for i in infos]))
                 # Push metrics
                 self.logger.record(
-                    "metrics/force_gate_mean",
-                    np.mean([i.get("force_gate", 0)
+                    "metrics/push_gate_mean",
+                    np.mean([i.get("push_gate", 0)
                              for i in infos]))
                 self.logger.record(
                     "metrics/rock_contact_force_mean",
@@ -249,6 +249,23 @@ class CurriculumCallback(BaseCallback):
                 self.logger.record(
                     "metrics/balance_reward_mean",
                     np.mean([i.get("balance_reward", 0)
+                             for i in infos]))
+                # Rock interaction metrics
+                self.logger.record(
+                    "metrics/approach_reward_mean",
+                    np.mean([i.get("approach_reward", 0)
+                             for i in infos]))
+                self.logger.record(
+                    "metrics/contact_intensity_mean",
+                    np.mean([i.get("contact_intensity", 0)
+                             for i in infos]))
+                self.logger.record(
+                    "metrics/touch_bonus_mean",
+                    np.mean([i.get("touch_bonus", 0)
+                             for i in infos]))
+                self.logger.record(
+                    "metrics/hand_near_reward_mean",
+                    np.mean([i.get("hand_near_reward", 0)
                              for i in infos]))
 
                 # Rolling promotion score

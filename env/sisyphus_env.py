@@ -174,7 +174,7 @@ class SisyphusEnv(gym.Env):
         self._alive_bonus = alive_bonus
         self._upright_coef = upright_coef
         self._forward_push_coef = forward_push_coef
-        self._walk_only_mode = walk_only_mode
+        self._walk_only_mode = False  # ignored — rock always present
         self._set_rock_mass(rock_mass)
         self._set_slope(slope_deg)
 
@@ -379,11 +379,13 @@ class SisyphusEnv(gym.Env):
         parts.append(np.array([np.sin(phase), np.cos(phase)], dtype=np.float32))
 
         # Foot ground reaction forces (2 floats) — weight distribution
+        # Normalized by 500N (typical standing GRF ~400-800N per foot)
         right_grf, left_grf = self._foot_ground_forces()
-        parts.append(np.array([right_grf, left_grf], dtype=np.float32))
+        parts.append(np.array([right_grf / 500.0, left_grf / 500.0], dtype=np.float32))
 
         # Rock contact force magnitude (1 float) — push intensity
-        parts.append(np.array([self._agent_rock_contact_force()], dtype=np.float32))
+        # Normalized by 500N to keep O(1) scale
+        parts.append(np.array([self._agent_rock_contact_force() / 500.0], dtype=np.float32))
 
         # Terrain slope (1 float) — slope-conditioned policy
         parts.append(np.array([self._slope_deg / 15.0], dtype=np.float32))
@@ -440,21 +442,19 @@ class SisyphusEnv(gym.Env):
             self._last_rock_contact_step = self._step_count
             self._episode_rock_contact_steps += 1
 
-        # --- Force-based push gating (replaces binary 5-step window) ---
+        # --- Contact intensity & push gating ---
         rock_contact_force = self._agent_rock_contact_force()
-        force_gate = np.clip(rock_contact_force / 200.0, 0.0, 1.0)
-        # Fallback for early training when forces are small
-        binary_gate = float(
-            (self._step_count - self._last_rock_contact_step) < 5
+        contact_intensity = np.clip(
+            rock_contact_force / 200.0, 0.0, 1.0
         )
-        force_gate = max(force_gate, 0.3 * binary_gate)
-
-        # In walk-only mode, disable push rewards entirely
-        if self._walk_only_mode:
-            force_gate = 0.0
+        # Soft push gate: any contact counts (binary or force-based)
+        push_gate = max(
+            contact_intensity,
+            0.5 * float(agent_touching_rock),
+        )
 
         # Accumulate agent-pushed forward displacement
-        if force_gate > 0 and delta_x_rock > 0:
+        if push_gate > 0 and delta_x_rock > 0:
             if torso_pos[0] <= rock_x:
                 self._episode_pushed_forward += delta_x_rock
 
@@ -467,11 +467,11 @@ class SisyphusEnv(gym.Env):
 
         # --- Rewards ---
 
-        # Forward-push reward (force-gated)
-        forward_reward = 10.0 * max(delta_x_rock, 0) * force_gate
+        # Forward-push reward (push-gated, dominant signal)
+        forward_reward = 15.0 * max(delta_x_rock, 0) * push_gate
 
-        # Height reward (force-gated)
-        height_reward = 50.0 * max(delta_h_rock, 0) * force_gate
+        # Height reward (push-gated, for uphill phases)
+        height_reward = 50.0 * max(delta_h_rock, 0) * push_gate
 
         # Rock rollback penalty
         rock_rollback_penalty = (
@@ -479,8 +479,8 @@ class SisyphusEnv(gym.Env):
             if self._slope_deg > 0 else 0.0
         )
 
-        # Lateral drift penalty
-        lateral_penalty = 2.0 * abs(rock_y)
+        # Lateral drift penalty (capped to avoid drowning posture rewards)
+        lateral_penalty = min(2.0 * abs(rock_y), 3.0)
 
         # Cost of transport (replaces torque penalty)
         qvel = self.data.qvel
@@ -514,12 +514,14 @@ class SisyphusEnv(gym.Env):
         height_reward_posture *= min(self._upright_coef, 2.0)
 
         # Getting-up reward: continuous height-proportional + velocity bonus
+        # Fades out above z=1.0 to avoid penalizing lower pushing postures
+        _GETUP_CEILING = 1.0
         torso_z_delta = torso_z - self._prev_torso_z
-        if torso_z < _HEIGHT_TARGET:
+        if torso_z < _GETUP_CEILING:
             height_frac = max(
                 0.0,
                 (torso_z - _HEIGHT_FLOOR)
-                / (_HEIGHT_TARGET - _HEIGHT_FLOOR),
+                / (_GETUP_CEILING - _HEIGHT_FLOOR),
             )
             getup_reward = (
                 2.0 * height_frac
@@ -529,12 +531,9 @@ class SisyphusEnv(gym.Env):
             getup_reward = 0.0
         self._prev_torso_z = torso_z
 
-        # Approach reward (disabled in walk-only mode)
+        # Approach reward: exponential proximity shaping (always active)
         rock_dist = np.linalg.norm(rock_pos[:2] - torso_pos[:2])
-        if self._walk_only_mode:
-            approach_reward = 0.0
-        else:
-            approach_reward = 5.0 * (self._prev_rock_dist - rock_dist)
+        approach_reward = 3.0 * np.exp(-rock_dist) * upright_gate
         self._prev_rock_dist = rock_dist
 
         # Small alive bonus (curriculum-decayed)
@@ -542,9 +541,11 @@ class SisyphusEnv(gym.Env):
 
         # --- Walking rewards ---
 
-        # COM forward velocity reward
+        # COM forward velocity reward (reduced, fades near rock)
+        proximity_damping = min(1.0, rock_dist / 2.0)
         walk_reward = (
-            2.5 * min(max(com_vel_x, 0.0), 1.5) * upright_gate
+            1.5 * min(max(com_vel_x, 0.0), 1.5)
+            * upright_gate * proximity_damping
         )
 
         # Cadence reward (replaces simple gait reward)
@@ -584,7 +585,7 @@ class SisyphusEnv(gym.Env):
                 regularity_bonus = max(0.0, 1.0 - cv)
 
             vel_scale = np.clip(com_vel_x / 0.6, 0.0, 1.0)
-            cadence_reward = 2.0 * vel_scale * (
+            cadence_reward = 1.0 * vel_scale * (
                 0.5 * interval_bonus + 0.5 * regularity_bonus
             )
 
@@ -597,7 +598,7 @@ class SisyphusEnv(gym.Env):
             expected_right * float(right_foot_on)
             + expected_left * float(left_foot_on)
         )
-        cadence_continuous = 0.3 * phase_match * upright_gate
+        cadence_continuous = 0.15 * phase_match * upright_gate
 
         # Bilateral symmetry penalty: penalize asymmetric hip angles
         left_hip_y_pos = self.data.qpos[self._left_hip_y_qpos_adr]
@@ -618,31 +619,36 @@ class SisyphusEnv(gym.Env):
 
         # Balance reward: standing upright with feet on ground
         if torso_z >= 1.0 and any_foot_on:
-            balance_reward = 1.5 * max(0.0, torso_up_dot)
+            balance_reward = 0.8 * max(0.0, torso_up_dot)
         else:
             balance_reward = 0.0
 
-        # Idle penalty (disabled during walk-only / balance phase)
-        if self._walk_only_mode:
-            idle_penalty = 0.0
-        else:
-            idle_penalty = (
-                -0.1
-                if (com_vel_x < 0.05 and self._step_count > 50)
-                else 0.0
-            )
-
-        # Contact reward: hand-on-rock, gated on uprightness
-        right_dist, left_dist = self._hand_rock_distances()
-        hand_contact = (
-            1.0 if (right_dist < 0.05 or left_dist < 0.05)
+        # Idle penalty (suppressed when bracing against rock)
+        idle_penalty = (
+            -0.1
+            if (com_vel_x < 0.05 and self._step_count > 50
+                and not agent_touching_rock)
             else 0.0
         )
-        contact_reward = hand_contact * upright_gate
 
-        # Body lean reward: torso oriented toward rock during push
+        # Touch bonus: binary reward for any body-rock contact
+        touch_bonus = 1.0 * float(agent_touching_rock) * upright_gate
+
+        # Contact reward: scales with applied force
+        contact_reward = (
+            2.0 * contact_intensity * upright_gate + touch_bonus
+        )
+
+        # Hand proximity reward: encourage hands near rock
+        right_dist, left_dist = self._hand_rock_distances()
+        min_hand_dist = min(right_dist, left_dist)
+        hand_near_reward = (
+            1.5 * np.exp(-2.0 * min_hand_dist) * upright_gate
+        )
+
+        # Body lean reward: torso oriented toward rock
         lean_reward = 0.0
-        if rock_dist < 1.5 and rock_contact_force > 10.0:
+        if rock_dist < 2.0:
             torso_fwd = torso_xmat[:, 0]
             rock_dir = rock_pos[:2] - torso_pos[:2]
             rock_dir_n = rock_dir / (
@@ -658,15 +664,19 @@ class SisyphusEnv(gym.Env):
         self._prev_action = action.copy()
 
         reward = (
-            height_reward + forward_reward + approach_reward
-            - cot_penalty - smoothness_penalty
-            + idle_penalty
-            + height_reward_posture + alive_bonus + getup_reward
+            # Tier 1: Posture
+            height_reward_posture + alive_bonus + getup_reward
+            # Tier 2: Locomotion (reduced)
             + walk_reward + cadence_reward + cadence_continuous
-            + stance_reward + contact_reward
-            + com_stability_reward + lean_reward + balance_reward
+            + stance_reward + balance_reward + com_stability_reward
+            # Tier 3: Rock interaction (dominant)
+            + approach_reward + contact_reward
+            + forward_reward + height_reward
+            + hand_near_reward + lean_reward
+            # Tier 4: Penalties
+            - cot_penalty - smoothness_penalty - symmetry_penalty
             - lateral_penalty - rock_rollback_penalty
-            - symmetry_penalty
+            + idle_penalty
         )
 
         # Infinite illusion: teleport when approaching terrain end
@@ -715,7 +725,9 @@ class SisyphusEnv(gym.Env):
             "forward_reward": forward_reward,
             "height_reward": height_reward,
             "contact_reward": contact_reward,
-            "hand_contact": hand_contact,
+            "touch_bonus": touch_bonus,
+            "contact_intensity": contact_intensity,
+            "hand_near_reward": hand_near_reward,
             "right_hand_dist": right_dist,
             "left_hand_dist": left_dist,
             "step_count": self._step_count,
@@ -729,7 +741,7 @@ class SisyphusEnv(gym.Env):
             "stance_reward": stance_reward,
             "lateral_penalty": lateral_penalty,
             "rock_rollback_penalty": rock_rollback_penalty,
-            "force_gate": force_gate,
+            "push_gate": push_gate,
             "rock_contact_force": rock_contact_force,
             "rock_delta_x_total": rock_delta_x_total,
             "gait_step_count": self._gait_step_count,
@@ -750,8 +762,8 @@ class SisyphusEnv(gym.Env):
         # Add promotion_score on terminal step — requires active pushing
         if terminated or truncated:
             contact_fraction = (self._episode_rock_contact_steps / max(self._step_count, 1))
-            # Only credit rock displacement from active pushing, require ≥10% contact
-            if contact_fraction >= 0.10:
+            # Only credit rock displacement from active pushing, require ≥5% contact
+            if contact_fraction >= 0.05:
                 promotion_score = (self._episode_pushed_forward
                                    - 2.0 * abs(rock_y)
                                    - self._episode_rollback_distance)
@@ -785,13 +797,8 @@ class SisyphusEnv(gym.Env):
         root_x = self.data.qpos[self._root_qpos_adr]
         self.data.qpos[self._root_qpos_adr + 2] += self._terrain_height_at_x(root_x)
 
-        # Rock placement depends on walk-only mode
-        if self._walk_only_mode:
-            # Walk-only: place rock far away so agent learns pure locomotion
-            rock_x = self.np_random.uniform(5.0, 7.0)
-        else:
-            # Normal: place rock nearby for pushing
-            rock_x = self.np_random.uniform(1.0, 2.5)
+        # Rock always placed 2-3m ahead for approach → contact → push learning
+        rock_x = self.np_random.uniform(2.0, 3.0)
 
         rock_z = self._terrain_height_at_x(rock_x) + self._ROCK_RADIUS  # radius above terrain
         self.data.qpos[self._rock_qpos_adr] = rock_x

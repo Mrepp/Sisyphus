@@ -25,33 +25,31 @@ class CurriculumParams:
 # Default schedule matching the training plan.
 # Phase promotion is metric-gated: rolling mean promotion_score must exceed
 # promotion_threshold, after at least min_steps in the phase.
-# max_steps is a safety cap — promotes even if metrics aren't met.
 SCHEDULE = [
-    # Phase I: Strong posture scaffolding. Walk-only for first walk_only_steps.
+    # Phase I: Posture scaffolding + approach/push learning (rock always present).
     {"phase": "I",   "slope": 0.0,  "mass": 20.0,
      "infinite": False, "alive_bonus": 1.0, "upright_coef": 3.0,
      "forward_push_coef": 5.0,
-     "promotion_metric": "promotion_score", "promotion_threshold": 4.0,
-     "min_steps": 4_000_000, "max_steps": 25_000_000,
-     "walk_only_steps": 1_500_000},
+     "promotion_metric": "promotion_score", "promotion_threshold": 3.0,
+     "min_steps": 3_000_000},
     # Phase II: Add slope. Reduce scaffolding.
     {"phase": "II",  "slope": 5.0,  "mass": 35.0,
      "infinite": False, "alive_bonus": 0.3, "upright_coef": 2.0,
      "forward_push_coef": 5.0,
      "promotion_metric": "promotion_score", "promotion_threshold": 4.0,
-     "min_steps": 5_000_000, "max_steps": 30_000_000},
+     "min_steps": 5_000_000},
     # Phase III: Steeper, heavier. Minimal scaffolding.
     {"phase": "III", "slope": 10.0, "mass": 50.0,
      "infinite": False, "alive_bonus": 0.0, "upright_coef": 1.0,
      "forward_push_coef": 5.0,
      "promotion_metric": "promotion_score", "promotion_threshold": 4.0,
-     "min_steps": 5_000_000, "max_steps": 40_000_000},
+     "min_steps": 5_000_000},
     # Phase IV: Full difficulty. Infinite mode (terminal phase).
-    {"phase": "IV",  "slope": 15.0, "mass": 40.0,
+    {"phase": "IV",  "slope": 15.0, "mass": 50.0,
      "infinite": True,  "alive_bonus": 0.0, "upright_coef": 0.5,
      "forward_push_coef": 5.0,
      "promotion_metric": None, "promotion_threshold": None,
-     "min_steps": None, "max_steps": None},
+     "min_steps": None},
 ]
 
 
@@ -132,9 +130,6 @@ class CurriculumManager:
 
         steps_in_phase = total_steps - self._phase_start_step
         min_steps = entry.get("min_steps", 0)
-
-        # No auto-promotion — the agent must earn it via metrics.
-        # (max_steps in the schedule is retained for informational purposes only.)
 
         # Not enough steps yet
         if steps_in_phase < min_steps:
