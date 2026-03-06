@@ -29,11 +29,11 @@ class CurriculumParams:
 SCHEDULE = [
     # Phase I: Strong posture scaffolding. Walk-only for first walk_only_steps.
     {"phase": "I",   "slope": 0.0,  "mass": 20.0,
-     "infinite": False, "alive_bonus": 0.5, "upright_coef": 3.0,
+     "infinite": False, "alive_bonus": 1.0, "upright_coef": 3.0,
      "forward_push_coef": 5.0,
      "promotion_metric": "promotion_score", "promotion_threshold": 4.0,
      "min_steps": 4_000_000, "max_steps": 25_000_000,
-     "walk_only_steps": 3_000_000},
+     "walk_only_steps": 1_500_000},
     # Phase II: Add slope. Reduce scaffolding.
     {"phase": "II",  "slope": 5.0,  "mass": 35.0,
      "infinite": False, "alive_bonus": 0.3, "upright_coef": 2.0,

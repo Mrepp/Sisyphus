@@ -1,19 +1,19 @@
-"""Visualize a trained agent across all curriculum phases it has completed.
+"""Visualize a trained agent across all curriculum phases.
 
-Loads a PPO checkpoint, renders the trained policy at each curriculum phase
-(plus zero-action baselines), and exports Blender-ready data for each phase.
+Loads a PPO checkpoint, renders the trained policy at each curriculum
+phase (plus zero-action baselines), and exports Blender-ready data.
 
-By default, connects to Google Drive, downloads the latest checkpoint, and
-renders it. Use --steps to pick a specific checkpoint, or --checkpoint for
-a local file.
-
-Outputs are organized in a git-commit-tagged folder under render_output/.
+Checkpoint resolution:
+  --steps N        Search local checkpoints/ folder (default)
+  --steps N -d     Download from Google Drive
+  --checkpoint P   Use an explicit local path
+  (no args)        Download latest from Google Drive
 
 Usage:
-    python scripts/visualize_trained_agent.py                    # latest from Drive
-    python scripts/visualize_trained_agent.py --steps 52331648   # specific step count
-    python scripts/visualize_trained_agent.py --checkpoint /local/path/to/model
-    python scripts/visualize_trained_agent.py --no-baseline --max-steps 2000
+    python scripts/visualize_trained_agent.py --steps 2000000
+    python scripts/visualize_trained_agent.py --steps 2000000 -d
+    python scripts/visualize_trained_agent.py --checkpoint path/model
+    python scripts/visualize_trained_agent.py  # latest from Drive
 """
 
 import argparse
@@ -38,6 +38,19 @@ from train.curriculum import SCHEDULE, CurriculumManager
 
 
 LOCAL_CHECKPOINT_DIR = os.path.join(_PROJECT_ROOT, "checkpoints")
+
+
+def _find_local_checkpoint(steps: int) -> str | None:
+    """Search local checkpoints dir for a .zip containing *steps* in its name."""
+    if not os.path.isdir(LOCAL_CHECKPOINT_DIR):
+        return None
+    for fname in os.listdir(LOCAL_CHECKPOINT_DIR):
+        if not fname.endswith(".zip"):
+            continue
+        match = re.search(r"(\d+)", fname)
+        if match and int(match.group(1)) == steps:
+            return os.path.join(LOCAL_CHECKPOINT_DIR, fname)
+    return None
 
 
 class ZeroPolicy:
@@ -194,6 +207,11 @@ def main():
         help="Skip rendering the zero-action baseline",
     )
     parser.add_argument(
+        "-d", "--drive",
+        action="store_true",
+        help="Download checkpoint from Google Drive instead of using local files.",
+    )
+    parser.add_argument(
         "--drive-folder-id",
         default=None,
         help="Google Drive folder ID for the checkpoints folder. "
@@ -207,39 +225,45 @@ def main():
     # --- Find checkpoint ---
     if args.checkpoint:
         # Explicit local path
-        checkpoint_path = args.checkpoint.replace(".zip", "")
-        match = re.search(r"sisyphus_ppo_(\d+)_steps", checkpoint_path)
-        if match:
-            total_steps = int(match.group(1))
-        elif "final" in os.path.basename(checkpoint_path):
-            total_steps = 100_000_000
-        else:
-            total_steps = 100_000_000
+        cp = args.checkpoint.replace(".zip", "")
+        match = re.search(r"(\d+)", os.path.basename(cp))
+        total_steps = int(match.group(1)) if match else 100_000_000
+        checkpoint_path = cp
+    elif args.steps is not None and not args.drive:
+        # --steps without -d: local only
+        total_steps = args.steps
+        local_path = _find_local_checkpoint(total_steps)
+        if local_path is None:
             print(
-                f"Warning: Could not parse step count from checkpoint name. "
-                f"Assuming final phase ({total_steps:,} steps)."
+                f"No local checkpoint for {total_steps:,} steps "
+                f"in {LOCAL_CHECKPOINT_DIR}/\n"
+                f"Available checkpoints:"
             )
-    elif args.steps is not None:
-        # Specific step count — check local, then Drive
+            if os.path.isdir(LOCAL_CHECKPOINT_DIR):
+                for f in sorted(os.listdir(LOCAL_CHECKPOINT_DIR)):
+                    if f.endswith(".zip"):
+                        print(f"  {f}")
+            print("\nUse -d to download from Google Drive.")
+            sys.exit(1)
+        checkpoint_path = local_path.replace(".zip", "")
+        print(f"Using local checkpoint: {os.path.basename(local_path)}")
+    elif args.steps is not None and args.drive:
+        # --steps with -d: download from Drive
         total_steps = args.steps
         filename = f"sisyphus_ppo_{total_steps}_steps.zip"
-        local_path = os.path.join(LOCAL_CHECKPOINT_DIR, filename)
-
-        if not os.path.exists(local_path):
-            from scripts.drive_utils import download_checkpoint
-            try:
-                local_path = download_checkpoint(
-                    filename, LOCAL_CHECKPOINT_DIR,
-                    args.drive_folder_id,
-                )
-            except Exception as e:
-                print(f"Error: {e}")
-                sys.exit(1)
-
+        from scripts.drive_utils import download_checkpoint
+        try:
+            local_path = download_checkpoint(
+                filename, LOCAL_CHECKPOINT_DIR,
+                args.drive_folder_id,
+            )
+        except Exception as e:
+            print(f"Error: {e}")
+            sys.exit(1)
         checkpoint_path = local_path.replace(".zip", "")
         print(f"Using checkpoint: {os.path.basename(local_path)}")
     else:
-        # No args — get the latest checkpoint from Drive
+        # No --steps: get latest from Drive
         from scripts.drive_utils import download_latest_checkpoint
         try:
             local_path, total_steps = download_latest_checkpoint(
@@ -248,10 +272,8 @@ def main():
         except Exception as e:
             print(f"Error: {e}")
             sys.exit(1)
-
         if total_steps == 0:
             total_steps = 100_000_000
-
         checkpoint_path = local_path.replace(".zip", "")
         print(f"Using checkpoint: {os.path.basename(local_path)}")
 

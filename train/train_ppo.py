@@ -156,7 +156,7 @@ def create_model(
     net_arch = hw.get("net_arch", [256, 256])
 
     defaults = dict(
-        learning_rate=lambda f: 2e-4 * f,
+        learning_rate=3e-4,
         n_steps=hw.get("n_steps", 2048),
         batch_size=hw.get("batch_size", 1024),
         n_epochs=10,

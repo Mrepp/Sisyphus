@@ -246,6 +246,10 @@ class CurriculumCallback(BaseCallback):
                     "metrics/symmetry_penalty_mean",
                     np.mean([i.get("symmetry_penalty", 0)
                              for i in infos]))
+                self.logger.record(
+                    "metrics/balance_reward_mean",
+                    np.mean([i.get("balance_reward", 0)
+                             for i in infos]))
 
                 # Rolling promotion score
                 rolling = self.curriculum.get_rolling_promotion_score()

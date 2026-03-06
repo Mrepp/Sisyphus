@@ -462,8 +462,8 @@ class SisyphusEnv(gym.Env):
         torso_xmat = self.data.xmat[self._torso_id].reshape(3, 3)
         torso_up_dot = torso_xmat[2, 2]
         # Soft upright gate: provides some reward even when tilted
-        # up_dot=1.0→1.0, up_dot=0.5→0.55, up_dot=0.0→0.1, up_dot<0→0.1
-        upright_gate = 0.1 + 0.9 * max(0.0, torso_up_dot)
+        # up_dot=1.0→1.0, up_dot=0.5→0.65, up_dot=0.0→0.3, up_dot<0→0.3
+        upright_gate = 0.3 + 0.7 * max(0.0, torso_up_dot)
 
         # --- Rewards ---
 
@@ -508,15 +508,23 @@ class SisyphusEnv(gym.Env):
             height_reward_posture = 2.0 * frac
         elif torso_z >= _HEIGHT_FLOOR:
             frac = (_HEIGHT_ZERO - torso_z) / (_HEIGHT_ZERO - _HEIGHT_FLOOR)
-            height_reward_posture = -4.0 * frac
+            height_reward_posture = -2.0 * frac
         else:
-            height_reward_posture = -4.0
-        height_reward_posture *= max(self._upright_coef, 0.5)
+            height_reward_posture = -2.0
+        height_reward_posture *= min(self._upright_coef, 2.0)
 
-        # Getting-up reward: reward for increasing torso height when below target
+        # Getting-up reward: continuous height-proportional + velocity bonus
         torso_z_delta = torso_z - self._prev_torso_z
-        if torso_z < 1.0:
-            getup_reward = 3.0 * max(torso_z_delta, 0.0)
+        if torso_z < _HEIGHT_TARGET:
+            height_frac = max(
+                0.0,
+                (torso_z - _HEIGHT_FLOOR)
+                / (_HEIGHT_TARGET - _HEIGHT_FLOOR),
+            )
+            getup_reward = (
+                2.0 * height_frac
+                + 5.0 * max(torso_z_delta, 0.0)
+            )
         else:
             getup_reward = 0.0
         self._prev_torso_z = torso_z
@@ -536,7 +544,7 @@ class SisyphusEnv(gym.Env):
 
         # COM forward velocity reward
         walk_reward = (
-            1.5 * min(max(com_vel_x, 0.0), 1.5) * upright_gate
+            2.5 * min(max(com_vel_x, 0.0), 1.5) * upright_gate
         )
 
         # Cadence reward (replaces simple gait reward)
@@ -558,9 +566,9 @@ class SisyphusEnv(gym.Env):
             self._last_sole_foot = current_sole
             self._gait_step_count += 1
 
-            # Target ~60 steps (~0.9s at 67Hz) between switches
-            TARGET_INTERVAL = 60
-            INTERVAL_TOLERANCE = 20
+            # Target ~40 steps (~0.6s at 67Hz) between switches
+            TARGET_INTERVAL = 40
+            INTERVAL_TOLERANCE = 25
             interval_error = abs(interval - TARGET_INTERVAL)
             interval_bonus = max(
                 0.0, 1.0 - interval_error / INTERVAL_TOLERANCE
@@ -608,11 +616,21 @@ class SisyphusEnv(gym.Env):
         )
         self._prev_com_z = com_z
 
-        # Idle penalty
-        idle_penalty = (
-            -0.1 if (com_vel_x < 0.05 and self._step_count > 50)
-            else 0.0
-        )
+        # Balance reward: standing upright with feet on ground
+        if torso_z >= 1.0 and any_foot_on:
+            balance_reward = 1.5 * max(0.0, torso_up_dot)
+        else:
+            balance_reward = 0.0
+
+        # Idle penalty (disabled during walk-only / balance phase)
+        if self._walk_only_mode:
+            idle_penalty = 0.0
+        else:
+            idle_penalty = (
+                -0.1
+                if (com_vel_x < 0.05 and self._step_count > 50)
+                else 0.0
+            )
 
         # Contact reward: hand-on-rock, gated on uprightness
         right_dist, left_dist = self._hand_rock_distances()
@@ -646,7 +664,7 @@ class SisyphusEnv(gym.Env):
             + height_reward_posture + alive_bonus + getup_reward
             + walk_reward + cadence_reward + cadence_continuous
             + stance_reward + contact_reward
-            + com_stability_reward + lean_reward
+            + com_stability_reward + lean_reward + balance_reward
             - lateral_penalty - rock_rollback_penalty
             - symmetry_penalty
         )
@@ -726,6 +744,7 @@ class SisyphusEnv(gym.Env):
             "lean_reward": lean_reward,
             "cadence_continuous": cadence_continuous,
             "symmetry_penalty": symmetry_penalty,
+            "balance_reward": balance_reward,
         }
 
         # Add promotion_score on terminal step — requires active pushing
