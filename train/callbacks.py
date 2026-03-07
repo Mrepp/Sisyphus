@@ -267,6 +267,23 @@ class CurriculumCallback(BaseCallback):
                     "metrics/hand_near_reward_mean",
                     np.mean([i.get("hand_near_reward", 0)
                              for i in infos]))
+                # Backward lean / balance metrics
+                self.logger.record(
+                    "metrics/backward_lean_penalty_mean",
+                    np.mean([i.get("backward_lean_penalty", 0)
+                             for i in infos]))
+                self.logger.record(
+                    "metrics/com_balance_reward_mean",
+                    np.mean([i.get("com_balance_reward", 0)
+                             for i in infos]))
+                self.logger.record(
+                    "metrics/back_on_ground_rate",
+                    np.mean([i.get("back_on_ground", 0)
+                             for i in infos]))
+                self.logger.record(
+                    "metrics/style_damping_mean",
+                    np.mean([i.get("style_damping", 1.0)
+                             for i in infos]))
 
                 # Rolling promotion score
                 rolling = self.curriculum.get_rolling_promotion_score()

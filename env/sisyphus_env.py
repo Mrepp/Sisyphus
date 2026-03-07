@@ -67,6 +67,18 @@ class SisyphusEnv(gym.Env):
         self._HAND_RADIUS = 0.04
         self._hfield_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_HFIELD, "terrain")
 
+        # Cache foot body IDs for COM-over-feet observation
+        self._right_foot_body_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_BODY, "right_foot")
+        self._left_foot_body_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_BODY, "left_foot")
+
+        # Cache back/torso geom IDs for early termination on backward collapse
+        self._back_geom_ids = set()
+        for name in ("torso1", "uwaist", "head", "butt"):
+            gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            self._back_geom_ids.add(gid)
+
         # Build set of all humanoid geom IDs (for agent-rock contact detection)
         self._humanoid_geom_ids = set()
         for i in range(self.model.ngeom):
@@ -256,6 +268,20 @@ class SisyphusEnv(gym.Env):
         return right_on, left_on
 
     # ------------------------------------------------------------------
+    # Back-ground contact detection (for early termination)
+    # ------------------------------------------------------------------
+    def _back_on_ground(self) -> bool:
+        """Check if any torso/back/head geom is in contact with terrain."""
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = c.geom1, c.geom2
+            if g1 == self._terrain_geom_id or g2 == self._terrain_geom_id:
+                other = g2 if g1 == self._terrain_geom_id else g1
+                if other in self._back_geom_ids:
+                    return True
+        return False
+
+    # ------------------------------------------------------------------
     # Agent-rock contact detection
     # ------------------------------------------------------------------
     def _agent_touching_rock(self) -> bool:
@@ -395,6 +421,19 @@ class SisyphusEnv(gym.Env):
         gravity_body = torso_xmat[2, :]  # world z-axis in body frame
         parts.append(gravity_body.astype(np.float32))
 
+        # COM-over-feet offset in torso local frame (2 floats) — balance proprioception
+        # Positive X = COM ahead of feet (stable for pushing), negative = behind (unstable)
+        com_xy = self.data.subtree_com[0][:2]
+        rf_xy = self.data.xpos[self._right_foot_body_id][:2]
+        lf_xy = self.data.xpos[self._left_foot_body_id][:2]
+        feet_mid = 0.5 * (rf_xy + lf_xy)
+        offset_world = com_xy - feet_mid
+        com_offset_local = np.array([
+            torso_xmat[0, 0] * offset_world[0] + torso_xmat[1, 0] * offset_world[1],
+            torso_xmat[0, 1] * offset_world[0] + torso_xmat[1, 1] * offset_world[1],
+        ], dtype=np.float32)
+        parts.append(com_offset_local)
+
         obs = np.concatenate(parts).astype(np.float32)
         return obs
 
@@ -453,6 +492,9 @@ class SisyphusEnv(gym.Env):
             0.5 * float(agent_touching_rock),
         )
 
+        # Suppress locomotion style priors during active pushing
+        style_damping = 1.0 - push_gate
+
         # Accumulate agent-pushed forward displacement
         if push_gate > 0 and delta_x_rock > 0:
             if torso_pos[0] <= rock_x:
@@ -464,6 +506,17 @@ class SisyphusEnv(gym.Env):
         # Soft upright gate: provides some reward even when tilted
         # up_dot=1.0→1.0, up_dot=0.5→0.65, up_dot=0.0→0.3, up_dot<0→0.3
         upright_gate = 0.3 + 0.7 * max(0.0, torso_up_dot)
+
+        # Backward lean detection: Z component of torso forward axis
+        # Positive = torso leans backward (forward axis points upward)
+        torso_forward_z = torso_xmat[2, 0]
+
+        # COM-over-feet for balance reward
+        com_xy = self.data.subtree_com[0][:2]
+        rf_xy = self.data.xpos[self._right_foot_body_id][:2]
+        lf_xy = self.data.xpos[self._left_foot_body_id][:2]
+        feet_mid_xy = 0.5 * (rf_xy + lf_xy)
+        com_ahead = com_xy[0] - feet_mid_xy[0]  # positive = COM ahead of feet
 
         # --- Rewards ---
 
@@ -495,7 +548,7 @@ class SisyphusEnv(gym.Env):
 
         # Action smoothness penalty
         action_delta = action - self._prev_action
-        smoothness_penalty = 0.005 * np.sum(action_delta ** 2)
+        smoothness_penalty = 0.005 * np.sum(action_delta ** 2) * style_damping
 
         # Unified height reward (replaces alive_bonus + fall_penalty + smooth_height)
         _HEIGHT_TARGET = 1.25   # standing height
@@ -587,7 +640,7 @@ class SisyphusEnv(gym.Env):
             vel_scale = np.clip(com_vel_x / 0.6, 0.0, 1.0)
             cadence_reward = 1.0 * vel_scale * (
                 0.5 * interval_bonus + 0.5 * regularity_bonus
-            )
+            ) * style_damping
 
         # Continuous per-step cadence reward (supplements event-based)
         # Phase from the gait clock: sin(phase) > 0 → expect right foot down
@@ -598,12 +651,12 @@ class SisyphusEnv(gym.Env):
             expected_right * float(right_foot_on)
             + expected_left * float(left_foot_on)
         )
-        cadence_continuous = 0.15 * phase_match * upright_gate
+        cadence_continuous = 0.15 * phase_match * upright_gate * style_damping
 
         # Bilateral symmetry penalty: penalize asymmetric hip angles
         left_hip_y_pos = self.data.qpos[self._left_hip_y_qpos_adr]
         right_hip_y_pos = self.data.qpos[self._right_hip_y_qpos_adr]
-        symmetry_penalty = 0.05 * abs(left_hip_y_pos - right_hip_y_pos)
+        symmetry_penalty = 0.05 * abs(left_hip_y_pos - right_hip_y_pos) * style_damping
 
         # Stance reward
         any_foot_on = float(right_foot_on or left_foot_on)
@@ -617,8 +670,8 @@ class SisyphusEnv(gym.Env):
         )
         self._prev_com_z = com_z
 
-        # Balance reward: standing upright with feet on ground
-        if torso_z >= 1.0 and any_foot_on:
+        # Balance reward: standing upright with feet on ground (lowered gate for approach crouch)
+        if torso_z >= 0.7 and any_foot_on:
             balance_reward = 0.8 * max(0.0, torso_up_dot)
         else:
             balance_reward = 0.0
@@ -647,8 +700,9 @@ class SisyphusEnv(gym.Env):
         )
 
         # Body lean reward: torso oriented toward rock
+        # Gated on feet on ground and not leaning backward
         lean_reward = 0.0
-        if rock_dist < 2.0:
+        if rock_dist < 2.0 and any_foot_on and torso_forward_z <= 0.1:
             torso_fwd = torso_xmat[:, 0]
             rock_dir = rock_pos[:2] - torso_pos[:2]
             rock_dir_n = rock_dir / (
@@ -660,15 +714,28 @@ class SisyphusEnv(gym.Env):
             )
             lean_reward = 1.5 * max(lean_dot, 0.0)
 
+        # Backward lean penalty: penalize torso tilting backward
+        # torso_forward_z > 0.1 means backward lean beyond dead zone
+        backward_lean_penalty = 0.0
+        if torso_forward_z > 0.1:
+            backward_lean_penalty = 2.0 * (torso_forward_z - 0.1) * style_damping
+
+        # COM-over-feet reward: reward COM ahead of feet, penalize behind
+        if any_foot_on and torso_z >= 0.7:
+            com_balance_reward = 0.5 * np.clip(com_ahead, -1.0, 0.3) * style_damping
+        else:
+            com_balance_reward = 0.0
+
         # Update previous action for next step
         self._prev_action = action.copy()
 
         reward = (
             # Tier 1: Posture
             height_reward_posture + alive_bonus + getup_reward
-            # Tier 2: Locomotion (reduced)
+            # Tier 2: Locomotion
             + walk_reward + cadence_reward + cadence_continuous
             + stance_reward + balance_reward + com_stability_reward
+            + com_balance_reward
             # Tier 3: Rock interaction (dominant)
             + approach_reward + contact_reward
             + forward_reward + height_reward
@@ -676,6 +743,7 @@ class SisyphusEnv(gym.Env):
             # Tier 4: Penalties
             - cot_penalty - smoothness_penalty - symmetry_penalty
             - lateral_penalty - rock_rollback_penalty
+            - backward_lean_penalty
             + idle_penalty
         )
 
@@ -706,9 +774,9 @@ class SisyphusEnv(gym.Env):
                 self.data.xpos[self._rock_id][:2] - self.data.xpos[self._torso_id][:2]
             )
 
-        # No early termination — let the agent learn from the full episode.
-        # The soft posture penalty above provides continuous gradient.
-        terminated = False
+        # Early termination: back/torso contacts ground after grace period
+        back_contact = self._back_on_ground()
+        terminated = back_contact and self._step_count > 50
         truncated = self._step_count >= self.max_steps
 
         # Compute episode metrics for promotion score
@@ -757,6 +825,10 @@ class SisyphusEnv(gym.Env):
             "cadence_continuous": cadence_continuous,
             "symmetry_penalty": symmetry_penalty,
             "balance_reward": balance_reward,
+            "backward_lean_penalty": backward_lean_penalty,
+            "com_balance_reward": com_balance_reward,
+            "back_on_ground": float(back_contact),
+            "style_damping": style_damping,
         }
 
         # Add promotion_score on terminal step — requires active pushing
