@@ -503,9 +503,9 @@ class SisyphusEnv(gym.Env):
         # --- Posture ---
         torso_xmat = self.data.xmat[self._torso_id].reshape(3, 3)
         torso_up_dot = torso_xmat[2, 2]
-        # Soft upright gate: provides some reward even when tilted
-        # up_dot=1.0→1.0, up_dot=0.5→0.65, up_dot=0.0→0.3, up_dot<0→0.3
-        upright_gate = 0.3 + 0.7 * max(0.0, torso_up_dot)
+        # Upright gate: sqrt preserves gradient at moderate tilt, zeroes at horizontal
+        # up_dot=1.0→1.0, up_dot=0.8→0.89, up_dot=0.5→0.71, up_dot=0.0→0.0
+        upright_gate = max(0.0, torso_up_dot) ** 0.5
 
         # Backward lean detection: Z component of torso forward axis
         # Positive = torso leans backward (forward axis points upward)
@@ -672,7 +672,7 @@ class SisyphusEnv(gym.Env):
 
         # Balance reward: standing upright with feet on ground (lowered gate for approach crouch)
         if torso_z >= 0.7 and any_foot_on:
-            balance_reward = 0.8 * max(0.0, torso_up_dot)
+            balance_reward = 1.5 * max(0.0, torso_up_dot)
         else:
             balance_reward = 0.0
 
@@ -702,7 +702,7 @@ class SisyphusEnv(gym.Env):
         # Body lean reward: torso oriented toward rock
         # Gated on feet on ground and not leaning backward
         lean_reward = 0.0
-        if rock_dist < 2.0 and any_foot_on and torso_forward_z <= 0.1:
+        if rock_dist < 2.0 and any_foot_on and torso_up_dot > 0.5 and torso_forward_z <= 0.1:
             torso_fwd = torso_xmat[:, 0]
             rock_dir = rock_pos[:2] - torso_pos[:2]
             rock_dir_n = rock_dir / (
@@ -716,13 +716,22 @@ class SisyphusEnv(gym.Env):
 
         # Backward lean penalty: penalize torso tilting backward
         # torso_forward_z > 0.1 means backward lean beyond dead zone
+        # Not damped by style_damping — stability signal, not style
         backward_lean_penalty = 0.0
         if torso_forward_z > 0.1:
-            backward_lean_penalty = 2.0 * (torso_forward_z - 0.1) * style_damping
+            backward_lean_penalty = 2.0 * (torso_forward_z - 0.1)
+
+        # Forward lean penalty: penalize excessive forward tilt
+        # Larger dead zone (0.3 vs 0.1) since forward lean is useful for pushing
+        # Not damped — past ~17 deg forward is a stability problem
+        forward_lean_penalty = 0.0
+        if torso_forward_z < -0.3:
+            forward_lean_penalty = 2.0 * (-torso_forward_z - 0.3)
 
         # COM-over-feet reward: reward COM ahead of feet, penalize behind
+        # Not damped by style_damping — stability signal, not style
         if any_foot_on and torso_z >= 0.7:
-            com_balance_reward = 0.5 * np.clip(com_ahead, -1.0, 0.3) * style_damping
+            com_balance_reward = 0.5 * np.clip(com_ahead, -1.0, 0.3)
         else:
             com_balance_reward = 0.0
 
@@ -743,7 +752,7 @@ class SisyphusEnv(gym.Env):
             # Tier 4: Penalties
             - cot_penalty - smoothness_penalty - symmetry_penalty
             - lateral_penalty - rock_rollback_penalty
-            - backward_lean_penalty
+            - backward_lean_penalty - forward_lean_penalty
             + idle_penalty
         )
 
@@ -826,6 +835,7 @@ class SisyphusEnv(gym.Env):
             "symmetry_penalty": symmetry_penalty,
             "balance_reward": balance_reward,
             "backward_lean_penalty": backward_lean_penalty,
+            "forward_lean_penalty": forward_lean_penalty,
             "com_balance_reward": com_balance_reward,
             "back_on_ground": float(back_contact),
             "style_damping": style_damping,

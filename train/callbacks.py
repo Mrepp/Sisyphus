@@ -273,6 +273,10 @@ class CurriculumCallback(BaseCallback):
                     np.mean([i.get("backward_lean_penalty", 0)
                              for i in infos]))
                 self.logger.record(
+                    "metrics/forward_lean_penalty_mean",
+                    np.mean([i.get("forward_lean_penalty", 0)
+                             for i in infos]))
+                self.logger.record(
                     "metrics/com_balance_reward_mean",
                     np.mean([i.get("com_balance_reward", 0)
                              for i in infos]))
