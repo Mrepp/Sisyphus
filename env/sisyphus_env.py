@@ -365,7 +365,7 @@ class SisyphusEnv(gym.Env):
         torso_height = np.array([torso_pos[2]])
 
         # Center of mass velocity
-        com_vel = self.data.subtree_linvel[0].copy()  # whole model COM velocity
+        com_vel = self.data.subtree_linvel[self._torso_id].copy()  # humanoid subtree COM velocity
 
         parts = [
             humanoid_qpos,
@@ -423,7 +423,7 @@ class SisyphusEnv(gym.Env):
 
         # COM-over-feet offset in torso local frame (2 floats) — balance proprioception
         # Positive X = COM ahead of feet (stable for pushing), negative = behind (unstable)
-        com_xy = self.data.subtree_com[0][:2]
+        com_xy = self.data.subtree_com[self._torso_id][:2]
         rf_xy = self.data.xpos[self._right_foot_body_id][:2]
         lf_xy = self.data.xpos[self._left_foot_body_id][:2]
         feet_mid = 0.5 * (rf_xy + lf_xy)
@@ -512,7 +512,7 @@ class SisyphusEnv(gym.Env):
         torso_forward_z = torso_xmat[2, 0]
 
         # COM-over-feet for balance reward
-        com_xy = self.data.subtree_com[0][:2]
+        com_xy = self.data.subtree_com[self._torso_id][:2]
         rf_xy = self.data.xpos[self._right_foot_body_id][:2]
         lf_xy = self.data.xpos[self._left_foot_body_id][:2]
         feet_mid_xy = 0.5 * (rf_xy + lf_xy)
@@ -542,9 +542,12 @@ class SisyphusEnv(gym.Env):
         mechanical_power = np.sum(
             np.abs(self.data.actuator_force * joint_vel)
         )
-        com_vel_x = self.data.subtree_linvel[0][0]
-        speed = max(abs(com_vel_x), 0.1)
-        cot_penalty = 0.002 * mechanical_power / speed
+        com_vel_x = self.data.subtree_linvel[self._torso_id][0]
+        # Gate COT on actual locomotion; flat effort penalty when stationary
+        if abs(com_vel_x) > 0.2:
+            cot_penalty = 0.002 * mechanical_power / abs(com_vel_x)
+        else:
+            cot_penalty = 0.0005 * mechanical_power
 
         # Action smoothness penalty
         action_delta = action - self._prev_action
@@ -586,7 +589,7 @@ class SisyphusEnv(gym.Env):
 
         # Approach reward: exponential proximity shaping (always active)
         rock_dist = np.linalg.norm(rock_pos[:2] - torso_pos[:2])
-        approach_reward = 3.0 * np.exp(-rock_dist) * upright_gate
+        approach_reward = 3.0 * np.exp(-0.5 * rock_dist) * upright_gate
         self._prev_rock_dist = rock_dist
 
         # Small alive bonus (curriculum-decayed)
@@ -663,7 +666,7 @@ class SisyphusEnv(gym.Env):
         stance_reward = 0.5 * any_foot_on * upright_gate
 
         # COM height stability reward
-        com_z = self.data.subtree_com[0][2]
+        com_z = self.data.subtree_com[self._torso_id][2]
         com_z_change = abs(com_z - self._prev_com_z)
         com_stability_reward = 0.3 * max(
             0.0, 1.0 - com_z_change / 0.05
@@ -676,13 +679,13 @@ class SisyphusEnv(gym.Env):
         else:
             balance_reward = 0.0
 
-        # Idle penalty (suppressed when bracing against rock)
-        idle_penalty = (
-            -0.1
-            if (com_vel_x < 0.05 and self._step_count > 50
-                and not agent_touching_rock)
-            else 0.0
-        )
+        # Idle penalty: ramps with time to create growing urgency
+        # Suppressed when bracing against rock
+        if com_vel_x < 0.1 and self._step_count > 50 and not agent_touching_rock:
+            idle_scale = min((self._step_count - 50) / 150.0, 1.0)
+            idle_penalty = -0.1 - 0.9 * idle_scale  # ramps -0.1 → -1.0
+        else:
+            idle_penalty = 0.0
 
         # Touch bonus: binary reward for any body-rock contact
         touch_bonus = 1.0 * float(agent_touching_rock) * upright_gate
@@ -925,7 +928,7 @@ class SisyphusEnv(gym.Env):
 
         # Reset action / locomotion smoothness tracking
         self._prev_action[:] = 0.0
-        self._prev_com_z = self.data.subtree_com[0][2]
+        self._prev_com_z = self.data.subtree_com[self._torso_id][2]
         self._prev_torso_z = self.data.xpos[self._torso_id][2]
 
         # Reset push attribution tracking
