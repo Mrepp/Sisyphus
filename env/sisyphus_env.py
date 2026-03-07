@@ -447,6 +447,7 @@ class SisyphusEnv(gym.Env):
 
         # Physics substeps
         mujoco.mj_step(self.model, self.data, nstep=5)
+        mujoco.mj_subtreeVel(self.model, self.data)
 
         self._step_count += 1
 
