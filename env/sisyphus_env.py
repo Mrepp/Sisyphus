@@ -65,6 +65,10 @@ class SisyphusEnv(gym.Env):
         self._left_foot_geom_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_GEOM, "left_foot")
         self._HAND_RADIUS = 0.04
+        self._hand_geom_ids = {
+            self._right_hand_geom_id,
+            self._left_hand_geom_id,
+        }
         self._hfield_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_HFIELD, "terrain")
 
         # Cache foot body IDs for COM-over-feet observation
@@ -151,6 +155,9 @@ class SisyphusEnv(gym.Env):
         self._prev_action = np.zeros(self._nu, dtype=np.float32)
         self._prev_com_z = 1.25
         self._prev_torso_z = 1.25
+
+        # Sustained contact force tracking (rolling average)
+        self._contact_force_history = deque(maxlen=8)
 
         # Push attribution tracking
         self._last_rock_contact_step = -10
@@ -303,6 +310,17 @@ class SisyphusEnv(gym.Env):
                 return True
         return False
 
+    def _hands_touching_rock(self) -> bool:
+        """Check if either hand geom is in contact with the rock."""
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = c.geom1, c.geom2
+            if g1 == self._rock_geom_id and g2 in self._hand_geom_ids:
+                return True
+            if g2 == self._rock_geom_id and g1 in self._hand_geom_ids:
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # Ground reaction forces
     # ------------------------------------------------------------------
@@ -340,6 +358,23 @@ class SisyphusEnv(gym.Env):
                 if other in self._humanoid_geom_ids:
                     force = np.zeros(6)
                     mujoco.mj_contactForce(self.model, self.data, i, force)
+                    total_force += abs(force[0])
+        return total_force
+
+    def _hand_rock_contact_force(self) -> float:
+        """Total normal force from hand-rock contacts only."""
+        total_force = 0.0
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = c.geom1, c.geom2
+            is_rock = (g1 == self._rock_geom_id
+                       or g2 == self._rock_geom_id)
+            if is_rock:
+                other = g2 if g1 == self._rock_geom_id else g1
+                if other in self._hand_geom_ids:
+                    force = np.zeros(6)
+                    mujoco.mj_contactForce(
+                        self.model, self.data, i, force)
                     total_force += abs(force[0])
         return total_force
 
@@ -484,22 +519,25 @@ class SisyphusEnv(gym.Env):
         # --- Contact detection ---
         right_foot_on, left_foot_on = self._foot_terrain_contacts()
         agent_touching_rock = self._agent_touching_rock()
+        hands_touching_rock = self._hands_touching_rock()
 
         # Update rock contact tracking for push attribution
+        # (any body part counts for tracking; only hands count for rewards)
         if agent_touching_rock:
             self._last_rock_contact_step = self._step_count
             self._episode_rock_contact_steps += 1
             self._has_contacted_rock = True
 
-        # --- Contact intensity & push gating ---
-        rock_contact_force = self._agent_rock_contact_force()
+        # --- Contact intensity & push gating (hand-only, sustained) ---
+        hand_contact_force = self._hand_rock_contact_force()
+        self._contact_force_history.append(hand_contact_force)
         contact_intensity = np.clip(
-            rock_contact_force / 200.0, 0.0, 1.0
+            np.mean(self._contact_force_history) / 200.0, 0.0, 1.0
         )
-        # Soft push gate: any contact counts (binary or force-based)
+        # Soft push gate: hand contact counts (binary or force-based)
         push_gate = max(
             contact_intensity,
-            0.5 * float(agent_touching_rock),
+            0.5 * float(hands_touching_rock),
         )
 
         # Suppress locomotion style priors during active pushing
@@ -513,9 +551,12 @@ class SisyphusEnv(gym.Env):
         # --- Posture ---
         torso_xmat = self.data.xmat[self._torso_id].reshape(3, 3)
         torso_up_dot = torso_xmat[2, 2]
-        # Upright gate: sqrt preserves gradient at moderate tilt, zeroes at horizontal
-        # up_dot=1.0→1.0, up_dot=0.8→0.89, up_dot=0.5→0.71, up_dot=0.0→0.0
-        upright_gate = max(0.0, torso_up_dot) ** 0.5
+        # Upright gate: strict piecewise, zeroes below ~60° tilt
+        # up_dot=1.0→1.0, up_dot=0.8→0.6, up_dot=0.5→0.0
+        if torso_up_dot < 0.5:
+            upright_gate = 0.0
+        else:
+            upright_gate = (torso_up_dot - 0.5) * 2.0
 
         # Backward lean detection: Z component of torso forward axis
         # Positive = torso leans backward (forward axis points upward)
@@ -699,14 +740,11 @@ class SisyphusEnv(gym.Env):
         else:
             idle_penalty = 0.0
 
-        # Touch bonus: binary reward for any body-rock contact (upright-gated — must stay upright to earn)
-        touch_bonus = 3.0 * float(agent_touching_rock) * upright_gate
+        # Touch bonus: binary reward for hand-rock contact (upright-gated)
+        touch_bonus = 3.0 * float(hands_touching_rock) * upright_gate
 
-        # Contact reward: scales with applied force + strong touch signal
-        contact_reward = (
-            5.0 * contact_intensity * upright_gate
-            + 3.0 * float(agent_touching_rock) * upright_gate
-        )
+        # Contact reward: sustained hand force magnitude only
+        contact_reward = 5.0 * contact_intensity * upright_gate
 
         # Hand proximity reward: encourage hands near rock
         right_dist, left_dist = self._hand_rock_distances()
@@ -757,12 +795,12 @@ class SisyphusEnv(gym.Env):
         # Only active while maintaining rock contact
         push_distance_bonus = (
             2.0 * min(self._episode_pushed_forward, 5.0)
-            * float(agent_touching_rock) * upright_gate
+            * float(hands_touching_rock) * upright_gate
         )
 
         # Brace reward: stable pushing posture (feet planted, low slip)
         brace_reward = 0.0
-        if agent_touching_rock and any_foot_on:
+        if hands_touching_rock and any_foot_on:
             rf_vel = self.data.subtree_linvel[self._right_foot_body_id]
             lf_vel = self.data.subtree_linvel[self._left_foot_body_id]
             foot_vel_sum = (np.linalg.norm(rf_vel)
@@ -770,10 +808,21 @@ class SisyphusEnv(gym.Env):
             foot_stability = max(0.0, 1.0 - foot_vel_sum / 1.0)
             brace_reward = 2.0 * upright_gate * foot_stability
 
-        # Post-contact fall penalty: falling after reaching rock
-        post_contact_fall_penalty = 0.0
-        if self._has_contacted_rock and torso_z < 0.5:
-            post_contact_fall_penalty = 3.0
+        # Post-contact collapse: zero ALL rock-interaction rewards
+        # when fallen after having contacted rock (replaces additive penalty)
+        post_contact_collapsed = (
+            self._has_contacted_rock and torso_z < 0.5
+        )
+        if post_contact_collapsed:
+            touch_bonus = 0.0
+            contact_reward = 0.0
+            hand_near_reward = 0.0
+            forward_reward = 0.0
+            height_reward = 0.0
+            push_distance_bonus = 0.0
+            brace_reward = 0.0
+            lean_reward = 0.0
+            approach_reward = 0.0
 
         # Update previous action for next step
         self._prev_action = action.copy()
@@ -786,7 +835,7 @@ class SisyphusEnv(gym.Env):
             + stance_reward + balance_reward + com_stability_reward
             + com_balance_reward
             # Tier 3: Rock interaction (dominant)
-            + approach_reward + contact_reward
+            + approach_reward + touch_bonus + contact_reward
             + forward_reward + height_reward
             + hand_near_reward + lean_reward
             + push_distance_bonus + brace_reward
@@ -794,7 +843,7 @@ class SisyphusEnv(gym.Env):
             - cot_penalty - smoothness_penalty - symmetry_penalty
             - lateral_penalty - rock_rollback_penalty
             - backward_lean_penalty - forward_lean_penalty
-            + idle_penalty - post_contact_fall_penalty
+            + idle_penalty
         )
 
         # Infinite illusion: teleport when approaching terrain end
@@ -860,7 +909,7 @@ class SisyphusEnv(gym.Env):
             "lateral_penalty": lateral_penalty,
             "rock_rollback_penalty": rock_rollback_penalty,
             "push_gate": push_gate,
-            "rock_contact_force": rock_contact_force,
+            "hand_contact_force": hand_contact_force,
             "rock_delta_x_total": rock_delta_x_total,
             "gait_step_count": self._gait_step_count,
             "right_foot_on": float(right_foot_on),
@@ -882,7 +931,8 @@ class SisyphusEnv(gym.Env):
             "style_damping": style_damping,
             "push_distance_bonus": push_distance_bonus,
             "brace_reward": brace_reward,
-            "post_contact_fall_penalty": post_contact_fall_penalty,
+            "hands_touching_rock": float(hands_touching_rock),
+            "post_contact_collapsed": float(post_contact_collapsed),
             "has_contacted_rock": float(self._has_contacted_rock),
         }
 
@@ -941,7 +991,7 @@ class SisyphusEnv(gym.Env):
         self.data.qvel[self._rock_qvel_adr: self._rock_qvel_adr + 6] = 0.0
 
         # Randomize rock friction for robustness
-        rock_friction_mu = self.np_random.uniform(1.0, 2.0)
+        rock_friction_mu = self.np_random.uniform(0.6, 1.2)
         self.model.geom_friction[self._rock_geom_id][0] = rock_friction_mu
 
         mujoco.mj_forward(self.model, self.data)
@@ -972,6 +1022,9 @@ class SisyphusEnv(gym.Env):
         self._prev_action[:] = 0.0
         self._prev_com_z = self.data.subtree_com[self._torso_id][2]
         self._prev_torso_z = self.data.xpos[self._torso_id][2]
+
+        # Reset sustained contact tracking
+        self._contact_force_history.clear()
 
         # Reset push attribution tracking
         self._last_rock_contact_step = -10

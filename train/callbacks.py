@@ -224,8 +224,8 @@ class CurriculumCallback(BaseCallback):
                     np.mean([i.get("push_gate", 0)
                              for i in infos]))
                 self.logger.record(
-                    "metrics/rock_contact_force_mean",
-                    np.mean([i.get("rock_contact_force", 0)
+                    "metrics/hand_contact_force_mean",
+                    np.mean([i.get("hand_contact_force", 0)
                              for i in infos]))
                 self.logger.record(
                     "metrics/gait_step_count_mean",

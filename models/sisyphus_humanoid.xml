@@ -146,7 +146,7 @@
     <body name="rock" pos="1.5 0 0.7">
       <freejoint name="rock_joint"/>
       <geom name="rock_geom" type="sphere" size="0.7" mass="40.0" material="rock_mat"
-            friction="1.5 0.1 0.05" condim="4" conaffinity="1" contype="1"
+            friction="1.0 0.05 0.03" condim="4" conaffinity="1" contype="1"
             solref="-10000 -200"/>
     </body>
   </worldbody>
