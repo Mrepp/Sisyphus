@@ -160,6 +160,7 @@ class SisyphusEnv(gym.Env):
         self._episode_rollback_distance = 0.0
         self._episode_rock_contact_steps = 0
         self._episode_pushed_forward = 0.0
+        self._has_contacted_rock = False
 
         # --- Spaces ---
         obs_size = self._get_obs().shape[0]
@@ -488,6 +489,7 @@ class SisyphusEnv(gym.Env):
         if agent_touching_rock:
             self._last_rock_contact_step = self._step_count
             self._episode_rock_contact_steps += 1
+            self._has_contacted_rock = True
 
         # --- Contact intensity & push gating ---
         rock_contact_force = self._agent_rock_contact_force()
@@ -529,7 +531,7 @@ class SisyphusEnv(gym.Env):
         # --- Rewards ---
 
         # Forward-push reward (push-gated, dominant signal)
-        forward_reward = 40.0 * max(delta_x_rock, 0) * push_gate
+        forward_reward = 40.0 * max(delta_x_rock, 0) * push_gate * upright_gate
 
         # Height reward (push-gated, for uphill phases)
         height_reward = 50.0 * max(delta_h_rock, 0) * push_gate
@@ -697,13 +699,13 @@ class SisyphusEnv(gym.Env):
         else:
             idle_penalty = 0.0
 
-        # Touch bonus: binary reward for any body-rock contact (no upright gate — fallen agent still gets signal)
-        touch_bonus = 3.0 * float(agent_touching_rock)
+        # Touch bonus: binary reward for any body-rock contact (upright-gated — must stay upright to earn)
+        touch_bonus = 3.0 * float(agent_touching_rock) * upright_gate
 
         # Contact reward: scales with applied force + strong touch signal
         contact_reward = (
             5.0 * contact_intensity * upright_gate
-            + 3.0 * float(agent_touching_rock)
+            + 3.0 * float(agent_touching_rock) * upright_gate
         )
 
         # Hand proximity reward: encourage hands near rock
@@ -755,8 +757,23 @@ class SisyphusEnv(gym.Env):
         # Only active while maintaining rock contact
         push_distance_bonus = (
             2.0 * min(self._episode_pushed_forward, 5.0)
-            * float(agent_touching_rock)
+            * float(agent_touching_rock) * upright_gate
         )
+
+        # Brace reward: stable pushing posture (feet planted, low slip)
+        brace_reward = 0.0
+        if agent_touching_rock and any_foot_on:
+            rf_vel = self.data.subtree_linvel[self._right_foot_body_id]
+            lf_vel = self.data.subtree_linvel[self._left_foot_body_id]
+            foot_vel_sum = (np.linalg.norm(rf_vel)
+                           + np.linalg.norm(lf_vel))
+            foot_stability = max(0.0, 1.0 - foot_vel_sum / 1.0)
+            brace_reward = 2.0 * upright_gate * foot_stability
+
+        # Post-contact fall penalty: falling after reaching rock
+        post_contact_fall_penalty = 0.0
+        if self._has_contacted_rock and torso_z < 0.5:
+            post_contact_fall_penalty = 3.0
 
         # Update previous action for next step
         self._prev_action = action.copy()
@@ -772,12 +789,12 @@ class SisyphusEnv(gym.Env):
             + approach_reward + contact_reward
             + forward_reward + height_reward
             + hand_near_reward + lean_reward
-            + push_distance_bonus
+            + push_distance_bonus + brace_reward
             # Tier 4: Penalties
             - cot_penalty - smoothness_penalty - symmetry_penalty
             - lateral_penalty - rock_rollback_penalty
             - backward_lean_penalty - forward_lean_penalty
-            + idle_penalty
+            + idle_penalty - post_contact_fall_penalty
         )
 
         # Infinite illusion: teleport when approaching terrain end
@@ -864,6 +881,9 @@ class SisyphusEnv(gym.Env):
             "back_on_ground": float(back_contact),
             "style_damping": style_damping,
             "push_distance_bonus": push_distance_bonus,
+            "brace_reward": brace_reward,
+            "post_contact_fall_penalty": post_contact_fall_penalty,
+            "has_contacted_rock": float(self._has_contacted_rock),
         }
 
         # Add promotion_score on terminal step — requires active pushing
@@ -961,6 +981,7 @@ class SisyphusEnv(gym.Env):
         self._episode_rollback_distance = 0.0
         self._episode_rock_contact_steps = 0
         self._episode_pushed_forward = 0.0
+        self._has_contacted_rock = False
 
         obs = self._get_obs()
         info = {
