@@ -162,15 +162,15 @@ def create_model(
         n_epochs=10,
         gamma=0.99,
         gae_lambda=0.95,
-        clip_range=0.15,
-        target_kl=0.03,
+        clip_range=0.2,
+        target_kl=None,
         ent_coef=0.01,
         verbose=1,
         device=hw.get("device", "auto"),
         tensorboard_log=tensorboard_log,
         policy_kwargs=dict(
             net_arch=[dict(pi=net_arch, vf=net_arch)],
-            log_std_init=-1.0,  # Initial std ≈ 0.37 (reduces flailing)
+            log_std_init=-0.5,  # Initial std ≈ 0.61 (closer to convergence)
         ),
     )
     defaults.update(kwargs)

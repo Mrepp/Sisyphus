@@ -109,6 +109,13 @@ class SisyphusEnv(gym.Env):
         # Number of actuators
         self._nu = self.model.nu  # 19 (17 body + 2 ankles)
 
+        # Cache actuator-to-DOF mapping for correct COT calculation
+        # (actuator order may differ from qvel DOF order, e.g. abdomen_y/z)
+        self._actuator_dof_adr = np.array([
+            self.model.jnt_dofadr[self.model.actuator_trnid[i, 0]]
+            for i in range(self._nu)
+        ], dtype=np.int32)
+
         # Cache joint IDs for symmetry penalty
         self._left_hip_y_jnt_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_JOINT, "left_hip_y")
@@ -537,9 +544,7 @@ class SisyphusEnv(gym.Env):
         lateral_penalty = min(2.0 * abs(rock_y), 3.0)
 
         # Cost of transport (replaces torque penalty)
-        qvel = self.data.qvel
-        joint_vel = qvel[self._root_qvel_adr + 6:
-                         self._rock_qvel_adr]
+        joint_vel = self.data.qvel[self._actuator_dof_adr]
         mechanical_power = np.sum(
             np.abs(self.data.actuator_force * joint_vel)
         )
@@ -588,9 +593,12 @@ class SisyphusEnv(gym.Env):
             getup_reward = 0.0
         self._prev_torso_z = torso_z
 
-        # Approach reward: exponential proximity shaping (always active)
+        # Approach reward: proximity + velocity shaping (always active)
         rock_dist = np.linalg.norm(rock_pos[:2] - torso_pos[:2])
-        approach_reward = 3.0 * np.exp(-0.5 * rock_dist) * upright_gate
+        approach_delta = self._prev_rock_dist - rock_dist  # positive = closer
+        approach_proximity = 2.0 * np.exp(-0.5 * rock_dist) * upright_gate
+        approach_velocity = 5.0 * max(approach_delta, 0.0) * upright_gate
+        approach_reward = approach_proximity + approach_velocity
         self._prev_rock_dist = rock_dist
 
         # Small alive bonus (curriculum-decayed)
@@ -601,7 +609,7 @@ class SisyphusEnv(gym.Env):
         # COM forward velocity reward (reduced, fades near rock)
         proximity_damping = min(1.0, rock_dist / 2.0)
         walk_reward = (
-            1.5 * min(max(com_vel_x, 0.0), 1.5)
+            2.5 * min(max(com_vel_x, 0.0), 1.5)
             * upright_gate * proximity_damping
         )
 
@@ -681,10 +689,11 @@ class SisyphusEnv(gym.Env):
             balance_reward = 0.0
 
         # Idle penalty: ramps with time to create growing urgency
-        # Suppressed when bracing against rock
-        if com_vel_x < 0.1 and self._step_count > 50 and not agent_touching_rock:
-            idle_scale = min((self._step_count - 50) / 150.0, 1.0)
-            idle_penalty = -0.1 - 0.9 * idle_scale  # ramps -0.1 → -1.0
+        # Must be actually walking (forward vel + foot contact), not just falling
+        actually_moving = com_vel_x > 0.3 and any_foot_on
+        if not actually_moving and self._step_count > 30 and not agent_touching_rock:
+            idle_scale = min((self._step_count - 30) / 120.0, 1.0)
+            idle_penalty = -0.3 - 1.7 * idle_scale  # ramps -0.3 → -2.0
         else:
             idle_penalty = 0.0
 

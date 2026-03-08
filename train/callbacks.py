@@ -34,6 +34,9 @@ class CurriculumCallback(BaseCallback):
         self.eval_env = eval_env
         self._last_phase = None
         self._last_walk_only = None
+        # Episode-level metric accumulators (logged every 10k steps)
+        self._episode_metrics = {}       # key -> [values]
+        self._episode_term_reasons = []  # "back_collapse" | "truncated"
 
     def _apply_params(self, params):
         """Push curriculum parameters to all vectorized envs."""
@@ -81,18 +84,35 @@ class CurriculumCallback(BaseCallback):
         infos = self.locals.get("infos", [])
         dones = self.locals.get("dones", [])
         for i, info in enumerate(infos):
-            # SB3 >=2.1 wraps terminal info in "terminal_info" key;
-            # SB3 >=2.3 provides it directly when done=True.
-            # The fallback `info.get("terminal_info", info)` handles both.
+            # SB3 v2.7.1+: when done=True, infos[i] directly contains
+            # the terminal step's info dict (not wrapped).
             if dones is not None and i < len(dones) and dones[i]:
-                # Check for terminal_observation wrapper pattern
-                terminal_info = info.get("terminal_info", info)
-                score = terminal_info.get("promotion_score")
+                score = info.get("promotion_score")
                 if score is not None:
                     self.curriculum.add_promotion_score(score)
-                contact_frac = terminal_info.get("contact_fraction")
+                contact_frac = info.get("contact_fraction")
                 if contact_frac is not None:
                     self.logger.record("metrics/contact_fraction", contact_frac)
+
+                # Track termination reason
+                if info.get("back_on_ground", False):
+                    self._episode_term_reasons.append("back_collapse")
+                else:
+                    self._episode_term_reasons.append("truncated")
+
+                # Track terminal-step reward components
+                for key in [
+                    "walk_reward", "approach_reward",
+                    "height_reward_posture", "idle_penalty",
+                    "balance_reward", "torso_height",
+                    "com_vel_x", "rock_distance",
+                    "back_on_ground",
+                    "hand_near_reward", "contact_reward", "lean_reward",
+                ]:
+                    val = info.get(key, 0.0)
+                    self._episode_metrics.setdefault(
+                        key, []
+                    ).append(float(val))
 
         # --- Check for phase transition ---
         changed, params = self.curriculum.check_transition(total_steps)
@@ -138,7 +158,10 @@ class CurriculumCallback(BaseCallback):
                 self._log_curriculum(params)
                 self._last_walk_only = params.walk_only_mode
 
-        # --- Log detailed metrics every 10000 steps ---
+        # --- Step-level metric snapshots (every 10k steps) ---
+        # NOTE: These reflect instantaneous state of all 16 envs at the
+        # logging step (mix of mid-episode and just-after-reset envs).
+        # For per-episode statistics, see "episode/" metrics below.
         if self.num_timesteps % 10000 == 0:
             if infos:
                 self.logger.record(
@@ -295,6 +318,26 @@ class CurriculumCallback(BaseCallback):
                     self.logger.record(
                         "curriculum/rolling_promotion_score",
                         rolling)
+
+            # Episode-level metrics (accumulated between log intervals)
+            if self._episode_term_reasons:
+                n = len(self._episode_term_reasons)
+                n_collapse = sum(
+                    1 for r in self._episode_term_reasons
+                    if r == "back_collapse"
+                )
+                self.logger.record(
+                    "episode/back_collapse_rate",
+                    n_collapse / max(n, 1))
+                self.logger.record(
+                    "episode/episodes_completed", n)
+                for key, vals in self._episode_metrics.items():
+                    if vals:
+                        self.logger.record(
+                            f"episode/{key}_mean",
+                            np.mean(vals))
+                self._episode_metrics.clear()
+                self._episode_term_reasons.clear()
 
         return True
 

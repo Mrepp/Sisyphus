@@ -28,7 +28,7 @@ class CurriculumParams:
 SCHEDULE = [
     # Phase I: Posture scaffolding + approach/push learning (rock always present).
     {"phase": "I",   "slope": 0.0,  "mass": 20.0,
-     "infinite": False, "alive_bonus": 1.0, "upright_coef": 3.0,
+     "infinite": False, "alive_bonus": 0.3, "upright_coef": 1.5,
      "forward_push_coef": 5.0,
      "promotion_metric": "promotion_score", "promotion_threshold": 3.0,
      "min_steps": 3_000_000},
